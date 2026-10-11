@@ -101,6 +101,9 @@ func (s *Service) Create(ctx context.Context, agent *apiv1alpha1.ResourceReferen
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, serviceerrors.NewFailedPrecondition("Agent does not have a ready prepared revision", err)
 	}
+	if errors.Is(err, database.ErrAdmissionClosed) {
+		return nil, serviceerrors.NewUnavailable("Session admission is closed for maintenance", err)
+	}
 	if err != nil {
 		return nil, serviceerrors.NewInternal("Failed to reserve Session", err)
 	}
@@ -282,6 +285,9 @@ func (s *Service) Resume(ctx context.Context, id string) (*apiv1alpha1.Session, 
 	session, err = s.workflow.Resume(ctx, session)
 	if errors.Is(err, database.ErrFailedPrecondition) {
 		return nil, serviceerrors.NewFailedPrecondition(err.Error(), err)
+	}
+	if errors.Is(err, database.ErrAdmissionClosed) {
+		return nil, serviceerrors.NewUnavailable("Session admission is closed for maintenance", err)
 	}
 	if errors.Is(err, database.ErrConflict) {
 		return nil, serviceerrors.NewAborted(err.Error(), err)

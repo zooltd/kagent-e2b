@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/kagent-dev/kagent/go/core/cli/internal/db/admissions"
 	"github.com/kagent-dev/kagent/go/core/cli/internal/db/migrate"
 	"github.com/kagent-dev/kagent/go/core/pkg/migrations"
 )
@@ -30,6 +31,7 @@ func newCommand(migrateCmd *cobra.Command) *cobra.Command {
 		Short: "Database operations (migrations, inspection)",
 	}
 	cmd.AddCommand(migrateCmd)
+	cmd.AddCommand(admissions.NewCommand())
 
 	// Hide the root's API-oriented persistent flags from help across the
 	// entire `db` subtree. They target the kagent server / Kubernetes,

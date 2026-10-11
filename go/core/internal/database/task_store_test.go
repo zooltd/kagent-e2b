@@ -32,24 +32,24 @@ func TestRuntimeTaskSaveRetriesAndVersions(t *testing.T) {
 
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateWorking}
 	firstHash := sha256.Sum256([]byte("working"))
-	firstVersion, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, firstHash[:], task, task, "")
+	firstVersion, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, firstHash[:], task, task, "", nil)
 	require.NoError(t, err)
 	require.Greater(t, firstVersion, initialVersion)
 
 	completed := *task
 	completed.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
 	secondHash := sha256.Sum256([]byte("completed"))
-	secondVersion, err := client.UpdateSessionTask(t.Context(), session.Id, firstVersion, secondHash[:], &completed, &completed, "")
+	secondVersion, err := client.UpdateSessionTask(t.Context(), session.Id, firstVersion, secondHash[:], &completed, &completed, "", nil)
 	require.NoError(t, err)
 	require.Greater(t, secondVersion, firstVersion)
 
 	// A response lost before the next update remains recoverable afterward.
-	replayedVersion, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, firstHash[:], task, task, "")
+	replayedVersion, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, firstHash[:], task, task, "", nil)
 	require.NoError(t, err)
 	require.Equal(t, firstVersion, replayedVersion)
-	_, err = client.UpdateSessionTask(t.Context(), session.Id, initialVersion, secondHash[:], &completed, &completed, "")
+	_, err = client.UpdateSessionTask(t.Context(), session.Id, initialVersion, secondHash[:], &completed, &completed, "", nil)
 	require.ErrorIs(t, err, ErrConflict)
-	_, err = client.UpdateSessionTask(t.Context(), session.Id, secondVersion, firstHash[:], task, task, "")
+	_, err = client.UpdateSessionTask(t.Context(), session.Id, secondVersion, firstHash[:], task, task, "", nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
 	stored, version, err := client.GetVersionedSessionTask(t.Context(), session.Id, string(task.ID))
 	require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestConcurrentRuntimeTaskSaves(t *testing.T) {
 			update.Status = a2a.TaskStatus{State: a2a.TaskStateWorking, Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))}
 			hash := sha256.Sum256([]byte(text))
 			<-start
-			_, err := client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &update, &update, "")
+			_, err := client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &update, &update, "", nil)
 			results <- err
 		}()
 	}
@@ -96,18 +96,18 @@ func TestRuntimeTaskSaveScopeAndAtomicity(t *testing.T) {
 	hash := sha256.Sum256([]byte("update"))
 	_, _, err = client.GetVersionedSessionTask(t.Context(), uuid.NewString(), string(task.ID))
 	require.ErrorIs(t, err, ErrNotFound)
-	_, err = client.UpdateSessionTask(t.Context(), uuid.NewString(), version, hash[:], task, task, "")
+	_, err = client.UpdateSessionTask(t.Context(), uuid.NewString(), version, hash[:], task, task, "", nil)
 	require.ErrorIs(t, err, ErrNotFound)
 	wrongScope := *task
 	wrongScope.ContextID = uuid.NewString()
-	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &wrongScope, &wrongScope, "")
+	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &wrongScope, &wrongScope, "", nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
 
 	// Cancellation is allowed while waiting, but malformed event identity must
 	// roll back the entire save, including any archived status message.
 	canceled := *task
 	canceled.Status = a2a.TaskStatus{State: a2a.TaskStateCanceled}
-	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &canceled, &wrongScope, "")
+	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, hash[:], &canceled, &wrongScope, "", nil)
 	require.Error(t, err)
 	stored, after, err := client.GetVersionedSessionTask(t.Context(), session.Id, string(task.ID))
 	require.NoError(t, err)
@@ -124,19 +124,19 @@ func TestRuntimeTaskCreateRetries(t *testing.T) {
 	message.ContextID = session.ContextId
 	task := a2a.NewSubmittedTask(message, message)
 	hash := sha256.Sum256([]byte("create"))
-	version, err := client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "")
+	version, err := client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "", nil)
 	require.NoError(t, err)
-	retry, err := client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "")
+	retry, err := client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "", nil)
 	require.NoError(t, err)
 	require.Equal(t, version, retry)
 	different := sha256.Sum256([]byte("different create"))
-	_, err = client.CreateRuntimeTask(t.Context(), session.Id, different[:], task, "")
+	_, err = client.CreateRuntimeTask(t.Context(), session.Id, different[:], task, "", nil)
 	require.ErrorIs(t, err, ErrIdempotencyConflict)
 	working := *task
 	working.Status.State = a2a.TaskStateWorking
-	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, different[:], &working, &working, "")
+	_, err = client.UpdateSessionTask(t.Context(), session.Id, version, different[:], &working, &working, "", nil)
 	require.NoError(t, err)
-	retry, err = client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "")
+	retry, err = client.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "", nil)
 	require.NoError(t, err)
 	require.Equal(t, version, retry)
 }
@@ -151,11 +151,11 @@ func resumeRuntimeTask(t *testing.T, client *Client, sessionID string, reply *a2
 	}
 	task.History = append(task.History, reply)
 	hash := sha256.Sum256([]byte("input " + reply.ID))
-	version, err = client.UpdateSessionTask(t.Context(), sessionID, version, hash[:], task, task, "")
+	version, err = client.UpdateSessionTask(t.Context(), sessionID, version, hash[:], task, task, "", nil)
 	require.NoError(t, err)
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateWorking}
 	hash = sha256.Sum256([]byte("start " + reply.ID))
-	version, err = client.UpdateSessionTask(t.Context(), sessionID, version, hash[:], task, task, "")
+	version, err = client.UpdateSessionTask(t.Context(), sessionID, version, hash[:], task, task, "", nil)
 	require.NoError(t, err)
 	return task, version
 }
@@ -170,7 +170,7 @@ func TestRuntimeCompletionDoesNotWaitForSnapshot(t *testing.T) {
 	finished := *current
 	finished.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted, Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("done"))}
 	hash := sha256.Sum256([]byte("complete"))
-	version, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, hash[:], &finished, &finished, "")
+	version, err := client.UpdateSessionTask(t.Context(), session.Id, initialVersion, hash[:], &finished, &finished, "", nil)
 	require.NoError(t, err)
 	private, privateVersion, err := client.GetVersionedSessionTask(t.Context(), session.Id, string(waiting.ID))
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestRuntimeCompletionDoesNotWaitForSnapshot(t *testing.T) {
 	require.ErrorIs(t, deleteSession(t.Context(), client, session.Id), ErrFailedPrecondition)
 	_, err = client.ClaimSessionQuiescence(t.Context())
 	require.ErrorIs(t, err, ErrNotFound) // The native cleanup callback has not finished.
-	require.NoError(t, client.SettleSessionTask(t.Context(), session.Id, string(waiting.ID), version))
+	require.NoError(t, client.SettleSessionTask(t.Context(), session.Id, string(waiting.ID), version, nil))
 	public, err = client.GetSettledSessionTask(t.Context(), session.Id, string(waiting.ID), nil)
 	require.NoError(t, err)
 	require.Equal(t, a2a.TaskStateCompleted, public.Status.State)
@@ -203,12 +203,12 @@ func TestRuntimeCompletionDoesNotWaitForSnapshot(t *testing.T) {
 
 	fresh := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("next"))
 	fresh.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(t.Context(), session.Id, hash[:], a2a.NewSubmittedTask(fresh, fresh), "")
+	_, err = client.CreateRuntimeTask(t.Context(), session.Id, hash[:], a2a.NewSubmittedTask(fresh, fresh), "", nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
 	snapshot := &SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshot/exact", ContentScope: "DATA"}
 	require.NoError(t, client.FinishSessionQuiescence(t.Context(), work, snapshot))
 	require.NoError(t, client.FinishSessionQuiescence(t.Context(), work, snapshot))
-	require.NoError(t, client.SettleSessionTask(t.Context(), session.Id, string(waiting.ID), version))
+	require.NoError(t, client.SettleSessionTask(t.Context(), session.Id, string(waiting.ID), version, nil))
 	public, err = client.GetSessionTask(t.Context(), session.Id, string(waiting.ID), nil)
 	require.NoError(t, err)
 	require.Equal(t, a2a.TaskStateCompleted, public.Status.State)
@@ -226,11 +226,11 @@ func TestRuntimeForkRetainsOnlyTheCheckpointBoundary(t *testing.T) {
 	completed, initialVersion := resumeRuntimeTask(t, client, source.Id, reply)
 	completed.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
 	hash := sha256.Sum256([]byte("checkpoint boundary"))
-	version, err := client.UpdateSessionTask(t.Context(), source.Id, initialVersion, hash[:], completed, completed, "")
+	version, err := client.UpdateSessionTask(t.Context(), source.Id, initialVersion, hash[:], completed, completed, "", nil)
 	require.NoError(t, err)
 	_, _, err = client.ReserveSessionCheckpoint(t.Context(), &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: source.Id, HeadTaskId: string(completed.ID)}, "alice", uuid.NewString())
 	require.ErrorIs(t, err, ErrFailedPrecondition)
-	require.NoError(t, client.SettleSessionTask(t.Context(), source.Id, string(completed.ID), version))
+	require.NoError(t, client.SettleSessionTask(t.Context(), source.Id, string(completed.ID), version, nil))
 	boundary, err := client.ClaimSessionQuiescence(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, client.FinishSessionQuiescence(t.Context(), boundary, &SessionTaskSnapshot{Atespace: "team-a", URI: "turn-N", ContentScope: "DATA"}))
@@ -241,7 +241,7 @@ func TestRuntimeForkRetainsOnlyTheCheckpointBoundary(t *testing.T) {
 	newInput := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("source after checkpoint"))
 	newInput.ContextID = source.ContextId
 	later := a2a.NewSubmittedTask(newInput, newInput)
-	_, err = client.CreateRuntimeTask(t.Context(), source.Id, hash[:], later, "")
+	_, err = client.CreateRuntimeTask(t.Context(), source.Id, hash[:], later, "", nil)
 	require.NoError(t, err)
 	fork, _, err := client.ForkSession(t.Context(), checkpoint.Id, "alice", uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
@@ -285,13 +285,13 @@ func TestRuntimeForkRetainsOnlyTheCheckpointBoundary(t *testing.T) {
 	require.Zero(t, total)
 	_, _, err = client.GetVersionedSessionTask(t.Context(), fork.Id, string(later.ID))
 	require.ErrorIs(t, err, ErrNotFound)
-	_, err = client.UpdateSessionTask(t.Context(), fork.Id, initialVersion, hash[:], inherited, inherited, "")
+	_, err = client.UpdateSessionTask(t.Context(), fork.Id, initialVersion, hash[:], inherited, inherited, "", nil)
 	require.ErrorIs(t, err, ErrConflict, "source mutation receipts must not grant fork writes")
 	newInput.ID = "fork-input"
 	newInput.ContextID = fork.Id
 	newInput.Parts = a2a.ContentParts{a2a.NewTextPart("independent fork")}
 	forkInput := a2a.NewSubmittedTask(newInput, newInput)
-	_, err = client.CreateRuntimeTask(t.Context(), fork.Id, hash[:], forkInput, "")
+	_, err = client.CreateRuntimeTask(t.Context(), fork.Id, hash[:], forkInput, "", nil)
 	require.NoError(t, err)
 	_, err = client.GetSessionTask(t.Context(), source.Id, string(forkInput.ID), nil)
 	require.ErrorIs(t, err, ErrNotFound)
@@ -307,9 +307,9 @@ func TestNewExecutionRacesIdleClaim(t *testing.T) {
 		reply.TaskID, reply.ContextID = waiting.ID, waiting.ContextID
 		task, version := resumeRuntimeTask(t, client, session.Id, reply)
 		task.Status.State = a2a.TaskStateCompleted
-		version, err := client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("finish"), task, task, "")
+		version, err := client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("finish"), task, task, "", nil)
 		require.NoError(t, err)
-		require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version))
+		require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version, nil))
 
 		start := make(chan struct{})
 		claimed := make(chan *SessionQuiescence, 1)
@@ -340,10 +340,10 @@ func TestNewExecutionRacesIdleClaim(t *testing.T) {
 		}
 		_, err = client.ClaimSessionQuiescence(ctx)
 		require.ErrorIs(t, err, ErrNotFound, "dispatch must protect the network gap before persistence")
-		_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("next"), next, dispatchID.String())
+		_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("next"), next, dispatchID.String(), nil)
 		require.NoError(t, err)
 		// A lost cleanup acknowledgement cannot requeue an obsolete suspension.
-		require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version))
+		require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version, nil))
 		_, err = client.ClaimSessionQuiescence(ctx)
 		require.ErrorIs(t, err, ErrNotFound)
 		visible, err := client.GetSettledSessionTask(ctx, session.Id, string(task.ID), nil)
@@ -363,7 +363,7 @@ func TestRuntimeTaskLookupRejectsAmbiguousMessageIDs(t *testing.T) {
 	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("another task"))
 	message.ID, message.ContextID = messageID, session.ContextId
 	task := a2a.NewSubmittedTask(message, message)
-	_, err = client.CreateRuntimeTask(t.Context(), session.Id, taskMutationHash("another task"), task, "")
+	_, err = client.CreateRuntimeTask(t.Context(), session.Id, taskMutationHash("another task"), task, "", nil)
 	require.NoError(t, err)
 	_, err = client.GetSessionTaskByMessage(t.Context(), session.Id, "", messageID)
 	require.ErrorIs(t, err, ErrConflict)
@@ -391,17 +391,17 @@ func TestDispatchFencesIdleWorkAndLateAcceptance(t *testing.T) {
 	require.NoError(t, err)
 	resumed := *waiting
 	resumed.Status.State = a2a.TaskStateWorking
-	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("late"), &resumed, &resumed, dispatchID.String())
+	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("late"), &resumed, &resumed, dispatchID.String(), nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
 
 	dispatchID = uuid.New()
 	require.NoError(t, client.ReserveSessionDispatch(ctx, session.Id, dispatchID, ""))
 	// SDKs may first append input while retaining the waiting state.
-	version, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("input-only"), waiting, waiting, dispatchID.String())
+	version, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("input-only"), waiting, waiting, dispatchID.String(), nil)
 	require.NoError(t, err)
 	_, err = client.ClaimSessionQuiescence(ctx)
 	require.ErrorIs(t, err, ErrNotFound)
-	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("active"), &resumed, &resumed, dispatchID.String())
+	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("active"), &resumed, &resumed, dispatchID.String(), nil)
 	require.NoError(t, err)
 	revoked, err = client.RevokeSessionDispatch(ctx, session.Id, dispatchID, "new-input")
 	require.NoError(t, err)
@@ -420,16 +420,16 @@ func TestDispatchExpiryRejectsLateSave(t *testing.T) {
 	require.NoError(t, err)
 	next := newSessionTask(uuid.NewString(), "next-message")
 	next.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("expired"), next, id.String())
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("expired"), next, id.String(), nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
 	newID := uuid.New()
 	require.NoError(t, client.ReserveSessionDispatch(ctx, session.Id, newID, ""))
 	revoked, err := client.RevokeSessionDispatch(ctx, session.Id, id, "next-message")
 	require.NoError(t, err)
 	require.False(t, revoked)
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("stale"), next, id.String())
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("stale"), next, id.String(), nil)
 	require.ErrorIs(t, err, ErrFailedPrecondition)
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("current"), next, newID.String())
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("current"), next, newID.String(), nil)
 	require.NoError(t, err)
 	stored, err := client.GetSessionTask(ctx, session.Id, string(waiting.ID), nil)
 	require.NoError(t, err)
@@ -448,7 +448,7 @@ func TestRevokedContinuationWithSavedInputIsNotRetryable(t *testing.T) {
 	input := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("continue"))
 	input.TaskID, input.ContextID = waiting.ID, waiting.ContextID
 	waiting.History = append(waiting.History, input)
-	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("input"), waiting, input, id.String())
+	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("input"), waiting, input, id.String(), nil)
 	require.NoError(t, err)
 	notAccepted, err := client.RevokeSessionDispatch(ctx, session.Id, id, input.ID)
 	require.NoError(t, err)
@@ -464,9 +464,9 @@ func TestCheckpointPinsExpectedTaskWhileSnapshotIsPending(t *testing.T) {
 	reply.TaskID, reply.ContextID = waiting.ID, waiting.ContextID
 	task, version := resumeRuntimeTask(t, client, session.Id, reply)
 	task.Status.State = a2a.TaskStateCompleted
-	version, err := client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("finish"), task, task, "")
+	version, err := client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("finish"), task, task, "", nil)
 	require.NoError(t, err)
-	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version))
+	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version, nil))
 	request := &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: string(task.ID)}
 	_, _, err = client.ReserveSessionCheckpoint(ctx, request, "alice", "checkpoint")
 	require.ErrorIs(t, err, ErrSnapshotPending)
@@ -479,7 +479,7 @@ func TestCheckpointPinsExpectedTaskWhileSnapshotIsPending(t *testing.T) {
 	require.NoError(t, err)
 	next := newSessionTask(uuid.NewString(), "next-message")
 	next.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("next"), next, "")
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("next"), next, "", nil)
 	require.NoError(t, err)
 	_, _, err = client.ReserveSessionCheckpoint(ctx, request, "alice", "checkpoint")
 	require.ErrorIs(t, err, ErrCheckpointAdvanced)
@@ -505,7 +505,7 @@ func TestInitialMessageReservationDeduplicatesAfterAcceptance(t *testing.T) {
 	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))
 	message.ID, message.ContextID = "first-message", session.Id
 	task := a2a.NewSubmittedTask(message, message)
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("first"), task, dispatch.String())
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("first"), task, dispatch.String(), nil)
 	require.NoError(t, err)
 	require.ErrorIs(t, client.ReserveSessionDispatch(ctx, session.Id, uuid.New(), "first-message"), ErrMessageAccepted)
 	require.ErrorIs(t, client.ReserveSessionDispatch(ctx, session.Id, uuid.New(), "different-message"), ErrConflict)

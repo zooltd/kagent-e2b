@@ -110,6 +110,8 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	_, err := sharedDB.Exec(context.Background(), `
 		TRUNCATE TABLE
 			scheduled_run,
+			execution_instance_binding,
+			execution_create_attempt,
 			tool, toolserver, memory,
 			session_share,
 			session, a2a_context, agent_definition, runtime_revision

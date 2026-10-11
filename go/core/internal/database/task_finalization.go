@@ -14,11 +14,17 @@ import (
 // atomically after native cleanup. It does not wait for runtime pause or snapshots.
 // Retries cannot republish an old state over a later turn. Callers authenticate
 // runtime authority; a missing or deleted session returns ErrNotFound.
-func (c *Client) SettleSessionTask(ctx context.Context, sessionID, taskID string, version int64) error {
+func (c *Client) SettleSessionTask(ctx context.Context, sessionID, taskID string, version int64, binding *ExecutionInstanceBinding) error {
 	return c.withTx(ctx, func(tx pgx.Tx) error {
 		session, err := lockSession(ctx, tx, sessionID)
 		if err != nil {
 			return notFoundOr(err)
+		}
+		// Session lock precedes the binding lock — the same ordering
+		// E2BOrphanDeletionGate and FinishE2BSessionDelete use — so a settle
+		// concurrent with orphan cleanup or delete does not deadlock.
+		if err := requireExecutionBinding(ctx, tx, sessionID, binding); err != nil {
+			return err
 		}
 		if session.State == "RUNTIME_STATE_DELETED" {
 			return ErrNotFound

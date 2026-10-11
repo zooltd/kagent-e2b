@@ -342,6 +342,9 @@ func (s *Service) Fork(ctx context.Context, checkpointID, requestID string) (*ap
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, serviceerrors.NewNotFound("Checkpoint not found", err)
 	}
+	if errors.Is(err, database.ErrAdmissionClosed) {
+		return nil, serviceerrors.NewUnavailable("Session admission is closed for maintenance", err)
+	}
 	if err != nil {
 		return nil, serviceerrors.NewInternal("Failed to reserve fork Session", err)
 	}

@@ -30,7 +30,7 @@ func TestCheckpointCreationBlocksSessionTaskWrites(t *testing.T) {
 
 	next := newSessionTask("next", "next-message")
 	next.ContextID = session.GetContextId()
-	_, err = client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("next-request"), next, "")
+	_, err = client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("next-request"), next, "", nil)
 	require.ErrorIs(t, err, ErrConflict)
 	require.ErrorIs(t, saveRuntimeTask(t, client, session.GetId(), task, task, nil), ErrFailedPrecondition)
 	_, _, err = client.BeginDeleteSessionCheckpoint(ctx, checkpoint.GetId(), "alice")
@@ -40,7 +40,7 @@ func TestCheckpointCreationBlocksSessionTaskWrites(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.FinalizeSessionCheckpoint(ctx, checkpoint.GetId(), "tag", "retained", "")
 	require.ErrorIs(t, err, ErrNotFound)
-	version, err := client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("next-request"), next, "")
+	version, err := client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("next-request"), next, "", nil)
 	require.NoError(t, err)
 	require.Positive(t, version)
 }

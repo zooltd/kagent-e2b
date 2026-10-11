@@ -59,7 +59,11 @@ func migrationSources(namespace *string) dbmigrate.SourcesFunc {
 		} else if b, ok := clusterVectorEnabled(ctx, *namespace); ok {
 			vectorEnabled = b
 		}
-		return migrations.BuiltinSources(vectorEnabled), nil
+		// The execution track carries the E2B/provider schema that ordinary store
+		// operations now depend on, including in Substrate mode. Register it after
+		// the built-in tracks, exactly as controller startup does via
+		// Options.ExtraMigrations — BuiltinSources stays upstream-ordered.
+		return append(migrations.BuiltinSources(vectorEnabled), migrations.ExecutionSource()), nil
 	}
 }
 

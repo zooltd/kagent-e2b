@@ -66,10 +66,17 @@ func (c *Client) ReserveSessionDispatch(ctx context.Context, sessionID string, d
 			}
 			return err
 		}
+		// The maintenance barrier gates NEW dispatch only. It sits after the
+		// ErrMessageAccepted retry check above so a retry of an already-accepted
+		// message is never refused by closure, and inside this transaction so the
+		// close and the dispatch reservation are atomic on the shared barrier row.
+		if err := requireAdmissionsOpen(ctx, tx); err != nil {
+			return err
+		}
 		return execSQL(ctx, tx, `
-			UPDATE session SET dispatch_id = $2, dispatch_expires_at = clock_timestamp() + INTERVAL '2 minutes'
-			WHERE id = $1
-		`, session.ID, dispatchID)
+		UPDATE session SET dispatch_id = $2, dispatch_expires_at = clock_timestamp() + INTERVAL '2 minutes'
+		WHERE id = $1
+	`, session.ID, dispatchID)
 	})
 }
 
@@ -105,29 +112,38 @@ func (c *Client) RevokeSessionDispatch(ctx context.Context, sessionID string, di
 // original committed version, even after later updates; a different stale save
 // returns ErrConflict. Callers authenticate the runtime's session authority and
 // provide a SHA-256 digest of the complete mutation. This never creates a task.
-func (c *Client) UpdateSessionTask(ctx context.Context, sessionID string, expectedVersion int64, mutationHash []byte, task *a2a.Task, event a2a.Event, dispatchID string) (int64, error) {
+func (c *Client) UpdateSessionTask(ctx context.Context, sessionID string, expectedVersion int64, mutationHash []byte, task *a2a.Task, event a2a.Event, dispatchID string, binding *ExecutionInstanceBinding) (int64, error) {
 	if expectedVersion <= 0 {
 		return 0, fmt.Errorf("task update requires a stored version")
 	}
-	return c.writeRuntimeTask(ctx, sessionID, expectedVersion, mutationHash, task, event, dispatchID)
+	return c.writeRuntimeTask(ctx, sessionID, expectedVersion, mutationHash, task, event, dispatchID, binding)
 }
 
 // CreateRuntimeTask stores a new SDK task and its history atomically. An identical
 // storage retry returns the original version; a different write to the same ID
 // conflicts. It does not deduplicate user requests or grant execution permission.
-func (c *Client) CreateRuntimeTask(ctx context.Context, sessionID string, mutationHash []byte, task *a2a.Task, dispatchID string) (int64, error) {
-	return c.writeRuntimeTask(ctx, sessionID, 0, mutationHash, task, task, dispatchID)
+func (c *Client) CreateRuntimeTask(ctx context.Context, sessionID string, mutationHash []byte, task *a2a.Task, dispatchID string, binding *ExecutionInstanceBinding) (int64, error) {
+	return c.writeRuntimeTask(ctx, sessionID, 0, mutationHash, task, task, dispatchID, binding)
 }
 
-func (c *Client) writeRuntimeTask(ctx context.Context, sessionID string, expectedVersion int64, mutationHash []byte, task *a2a.Task, event a2a.Event, dispatchID string) (int64, error) {
+func (c *Client) writeRuntimeTask(ctx context.Context, sessionID string, expectedVersion int64, mutationHash []byte, task *a2a.Task, event a2a.Event, dispatchID string, binding *ExecutionInstanceBinding) (int64, error) {
 	if expectedVersion < 0 || len(mutationHash) != 32 || task == nil || event == nil {
 		return 0, fmt.Errorf("runtime task update requires a version, digest, task, and event")
 	}
 	var version int64
 	err := c.withTx(ctx, func(tx pgx.Tx) error {
+		// Lock the session BEFORE the binding row: session-first ordering matches
+		// E2BOrphanDeletionGate and FinishE2BSessionDelete, so a runtime write
+		// concurrent with the orphan sweep or a delete cannot deadlock.
 		session, err := lockSession(ctx, tx, sessionID)
 		if err != nil {
 			return notFoundOr(err)
+		}
+		// Re-verify the live binding inside the mutation, serialized against
+		// revocation by the binding row lock, so a credential authorized before
+		// a concurrent revoke cannot commit a write afterwards.
+		if err := requireExecutionBinding(ctx, tx, sessionID, binding); err != nil {
+			return err
 		}
 		if session.State == apiv1alpha1.RuntimeState_RUNTIME_STATE_DELETED.String() {
 			return ErrNotFound

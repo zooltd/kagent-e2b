@@ -39,7 +39,7 @@ func TestMalformedDatabaseIDsReturnErrors(t *testing.T) {
 			return err
 		}},
 		{"create task", func() error {
-			_, err := client.CreateRuntimeTask(ctx, "invalid", taskMutationHash("hash"), newSessionTask("task", "message"), "")
+			_, err := client.CreateRuntimeTask(ctx, "invalid", taskMutationHash("hash"), newSessionTask("task", "message"), "", nil)
 			return err
 		}},
 	} {
@@ -103,7 +103,7 @@ func TestSessionTasksAreDurableAndExclusive(t *testing.T) {
 		Status:  a2a.TaskStatus{State: a2a.TaskStateSubmitted, Timestamp: &now},
 		History: []*a2a.Message{{ID: "message-1", Role: a2a.MessageRoleUser}},
 	}
-	version, err := client.CreateRuntimeTask(ctx, "11111111-1111-4111-8111-111111111111", taskMutationHash("request-1"), first, "")
+	version, err := client.CreateRuntimeTask(ctx, "11111111-1111-4111-8111-111111111111", taskMutationHash("request-1"), first, "", nil)
 	require.NoError(t, err)
 	require.Positive(t, version)
 	if events := countRows(t, db, "SELECT COUNT(*) FROM session_task_event"); events != 2 {
@@ -185,9 +185,9 @@ func TestSessionReplyArchivesStatusMessageAtomically(t *testing.T) {
 		ID: "task-1", ContextID: session.ContextId, History: []*a2a.Message{asked},
 		Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired, Message: question},
 	}
-	version, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("request-1"), parked, "")
+	version, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("request-1"), parked, "", nil)
 	require.NoError(t, err)
-	require.NoError(t, client.SettleSessionTask(ctx, sessionID, string(parked.ID), version))
+	require.NoError(t, client.SettleSessionTask(ctx, sessionID, string(parked.ID), version, nil))
 	boundary, err := client.ClaimSessionQuiescence(ctx)
 	require.NoError(t, err)
 	require.NoError(t, client.FinishSessionQuiescence(ctx, boundary, nil))
@@ -196,7 +196,7 @@ func TestSessionReplyArchivesStatusMessageAtomically(t *testing.T) {
 	resumed := *parked
 	resumed.History = []*a2a.Message{asked, question, answer}
 	resumed.Status = a2a.TaskStatus{State: a2a.TaskStateSubmitted}
-	if _, err := client.UpdateSessionTask(ctx, sessionID, version, taskMutationHash("reply"), &resumed, answer, ""); err != nil {
+	if _, err := client.UpdateSessionTask(ctx, sessionID, version, taskMutationHash("reply"), &resumed, answer, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,7 +228,7 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 	insertReadySessionFixture(t, db, sessionID, "session-request", sessionData)
 	client := NewClient(db)
 	task := newSessionTask("task-1", "message-1")
-	if _, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("message-request"), task, ""); err != nil {
+	if _, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("message-request"), task, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	task.Status.State = a2a.TaskStateCompleted
@@ -261,7 +261,7 @@ func TestSessionCheckpointRetainsRecordedBoundary(t *testing.T) {
 		*snapshot != (SessionTaskSnapshot{Atespace: "team-a", URI: "s3://snapshots/snapshot-1", ContentScope: "DATA"}) || checkpoint.HistorySequence == 0 {
 		t.Fatalf("checkpoint boundary = %+v", checkpoint)
 	}
-	if _, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("blocked-request"), newSessionTask("task-2", "message-2"), ""); !errors.Is(err, ErrConflict) {
+	if _, err := client.CreateRuntimeTask(ctx, sessionID, taskMutationHash("blocked-request"), newSessionTask("task-2", "message-2"), "", nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("CreateRuntimeTask() during checkpoint = %v, want %v", err, ErrConflict)
 	} else {
 		require.ErrorContains(t, err, "checkpoint being created")
@@ -395,7 +395,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 	first.History[0].TaskID = first.ID
 	first.History[0].ReferenceTasks = []a2a.TaskID{first.ID}
 	first.Status.Message = &a2a.Message{ID: "message-1", Role: a2a.MessageRoleAgent, TaskID: first.ID, ContextID: source.GetContextId()}
-	if _, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash("message-request-1"), first, ""); err != nil {
+	if _, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash("message-request-1"), first, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	first.Status.State = a2a.TaskStateInputRequired
@@ -429,7 +429,7 @@ func TestForkSessionCopiesBoundedHistory(t *testing.T) {
 
 	second := newSessionTask("task-2", "message-2")
 	second.ContextID = source.GetContextId()
-	if _, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash("message-request-2"), second, ""); err != nil {
+	if _, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash("message-request-2"), second, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	second.Status.State = a2a.TaskStateCompleted
@@ -774,7 +774,7 @@ func TestForkTaskOrderAndAuthorityIsolation(t *testing.T) {
 		task := newSessionTask(id, "message-"+id)
 		task.ContextID = source.GetContextId()
 		task.Status.Timestamp = &stamp
-		_, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash(id), task, "")
+		_, err := client.CreateRuntimeTask(ctx, source.GetId(), taskMutationHash(id), task, "", nil)
 		require.NoError(t, err)
 		task.Status.State = a2a.TaskStateCompleted
 		require.NoError(t, saveRuntimeTask(t, client, source.GetId(), task, task,
@@ -881,7 +881,7 @@ func TestDeletedSessionPreservesRequestIdentityAndHidesAccess(t *testing.T) {
 	require.NoError(t, err)
 	task := newSessionTask("task", "message")
 	task.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("hash"), task, "")
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("hash"), task, "", nil)
 	require.NoError(t, err)
 	task.Status.State = a2a.TaskStateInputRequired
 	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, nil))
@@ -905,9 +905,9 @@ func TestDeletedSessionPreservesRequestIdentityAndHidesAccess(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 	_, err = client.GetSessionTask(ctx, session.Id, string(task.ID), nil)
 	require.ErrorIs(t, err, ErrNotFound)
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("hash"), task, "")
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("hash"), task, "", nil)
 	require.ErrorIs(t, err, ErrNotFound, "even task retries must respect deletion")
-	_, err = client.UpdateSessionTask(ctx, session.Id, 1, taskMutationHash("reply"), task, task, "")
+	_, err = client.UpdateSessionTask(ctx, session.Id, 1, taskMutationHash("reply"), task, task, "", nil)
 	require.ErrorIs(t, err, ErrNotFound)
 	require.ErrorIs(t, saveRuntimeTask(t, client, session.Id, task, task, nil), ErrNotFound)
 	request.Id = uuid.NewString()

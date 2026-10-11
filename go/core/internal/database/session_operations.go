@@ -56,6 +56,17 @@ func beginSessionOperation(ctx context.Context, tx pgx.Tx, row sessionRow, kind 
 		if err := admitAgentLifecycle(ctx, tx, row, kind); err != nil {
 			return nil, err
 		}
+		// The maintenance barrier gates NEW lifecycle admission. RESUME brings a
+		// suspended session back to execution — it is new work, so it honors the
+		// barrier. DELETE/SUSPEND settle existing work and stay open; CREATE is
+		// already gated at session insert (insertSession). A same-operation retry
+		// (needed==false) skips this entirely. The check runs inside this
+		// transaction so closure and admission serialize on the barrier row.
+		if kind == apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_RESUME {
+			if err := requireAdmissionsOpen(ctx, tx); err != nil {
+				return nil, err
+			}
+		}
 		if kind == apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_DELETE {
 			// Deletion keeps task admission closed even if preparation fails
 			// and releases this operation. Only a delete retry can finish it.
@@ -141,6 +152,20 @@ func (c *Client) FinishSessionOperation(ctx context.Context, sessionID string, i
 			case apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE:
 				if authority == "" || actorUID == "" {
 					return fmt.Errorf("created Session requires runtime authority and actor UID")
+				}
+				// A Substrate completion must not bind an E2B revision. E2B
+				// sessions complete through FinishE2BSessionCreate, which leaves
+				// actor_uid NULL and records the instance binding instead.
+				if row.PreparedRevision != nil {
+					provider, err := queryOne(ctx, tx, `
+						SELECT provider FROM runtime_revision WHERE revision = $1
+					`, pgx.RowTo[string], *row.PreparedRevision)
+					if err != nil {
+						return notFoundOr(err)
+					}
+					if provider != ExecutionProviderSubstrate {
+						return fmt.Errorf("runtime revision %s is not a Substrate revision: %w", *row.PreparedRevision, ErrFailedPrecondition)
+					}
 				}
 				result.A2AAuthority = authority
 			case apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_DELETE:

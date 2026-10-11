@@ -26,7 +26,7 @@ func TestTaskViewsRebuildFromEvents(t *testing.T) {
 	require.NoError(t, err)
 	task := newSessionTask("task", "initial-message")
 	task.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("request hash"), task, "")
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("request hash"), task, "", nil)
 	require.NoError(t, err)
 	assertReplay := func() {
 		t.Helper()

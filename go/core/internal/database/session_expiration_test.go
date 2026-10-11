@@ -61,12 +61,12 @@ func TestSessionExpirationRechecksActivity(t *testing.T) {
 
 	task := newSessionTask(uuid.NewString(), "message")
 	task.ContextID, task.Status.State = session.ContextId, a2a.TaskStateCompleted
-	version, err := client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("completed"), task, "")
+	version, err := client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("completed"), task, "", nil)
 	require.NoError(t, err)
 	savedBefore := time.Now()
 	_, err = client.BeginIdleSessionDeletion(ctx, session.Id, time.Now())
 	require.ErrorIs(t, err, ErrConflict, "unpublished runtime cleanup blocks expiration")
-	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version))
+	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version, nil))
 	work, err := client.ClaimSessionQuiescence(ctx)
 	require.NoError(t, err)
 	_, err = client.BeginIdleSessionDeletion(ctx, session.Id, time.Now())
@@ -78,7 +78,7 @@ func TestSessionExpirationRechecksActivity(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, ids)
 
-	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version))
+	require.NoError(t, client.SettleSessionTask(ctx, session.Id, string(task.ID), version, nil))
 	deletion, err := client.BeginIdleSessionDeletion(ctx, session.Id, savedBefore)
 	require.NoError(t, err, "settlement and its retries must not extend the event's idle clock")
 	require.True(t, deletion.IdleSince.After(session.CreatedAt.AsTime()))

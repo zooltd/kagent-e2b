@@ -29,7 +29,7 @@ func TestPublicTaskCreationTimeSurvivesUpdates(t *testing.T) {
 	later := created.Add(time.Hour)
 	task.Status.Timestamp = &later
 	apia2a.SetTaskCreatedAt(task, later)
-	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("later status"), task, task, "")
+	_, err = client.UpdateSessionTask(ctx, session.Id, version, taskMutationHash("later status"), task, task, "", nil)
 	require.NoError(t, err)
 	got, err := client.GetSessionTask(ctx, session.Id, string(waiting.ID), nil)
 	require.NoError(t, err)

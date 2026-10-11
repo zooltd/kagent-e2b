@@ -23,6 +23,7 @@ import (
 type interactionStore interface {
 	ReserveSessionDispatch(context.Context, string, uuid.UUID, string) error
 	RevokeSessionDispatch(context.Context, string, uuid.UUID, string) (bool, error)
+	CheckAdmissionsOpen(context.Context) error
 	GetRuntimeRevision(context.Context, string) (*database.RuntimeRevision, error)
 	GetSessionTaskByMessage(context.Context, string, string, string) (*a2atype.Task, error)
 	GetSessionTask(context.Context, string, string, *int) (*a2atype.Task, error)
@@ -170,6 +171,22 @@ func (s *InteractionService) PrepareTaskSubscription(ctx context.Context, agent 
 		return nil, nil, a2atype.ErrInvalidParams
 	}
 	return s.prepareTask(ctx, agent, req.ID, auth.VerbGet)
+}
+
+// AdmitLiveSubscription serializes a request that needs a NEW runtime
+// connection with maintenance closure. Durable reads and already-quiescent
+// tasks never reach this check — the gateway calls it only for a task that is
+// still live, where subscribing would open a stream and possibly wake compute.
+// It runs the barrier's transactional admission check (FOR UPDATE, committed
+// before any dial): a close that lands first refuses this subscribe, and one
+// that lands after blocks until the decision commits — never interleaving. The
+// lock is released before the gateway dials. A barrier failure propagates so a
+// subscribe fails rather than guessing at admission state.
+func (s *InteractionService) AdmitLiveSubscription(ctx context.Context) error {
+	if err := s.store.CheckAdmissionsOpen(ctx); err != nil {
+		return interactionStoreError(ctx, err)
+	}
+	return nil
 }
 
 func (s *InteractionService) prepareTask(ctx context.Context, agent types.NamespacedName, id a2atype.TaskID, verb auth.Verb) (*apiv1alpha1.Session, *a2atype.Task, error) {
@@ -402,6 +419,12 @@ func interactionStoreError(ctx context.Context, err error) error {
 	if errors.Is(err, database.ErrNotFound) {
 		return a2atype.ErrTaskNotFound
 	}
+	if errors.Is(err, database.ErrAdmissionClosed) {
+		// A maintenance closure rejects new work with a recognizable, temporary
+		// signal distinct from a lifecycle conflict, so a caller can retry once
+		// admissions reopen.
+		return a2atype.NewError(a2atype.ErrUnsupportedOperation, "session admission is closed for maintenance; retry after the drain reopens")
+	}
 	if errors.Is(err, database.ErrFailedPrecondition) {
 		return a2atype.NewError(a2atype.ErrInvalidRequest, "reply does not match the pending input request")
 	}
@@ -517,6 +540,14 @@ func validateInteractionAgent(agent types.NamespacedName) error {
 }
 
 func interactionError(ctx context.Context, err error) error {
+	// A closed maintenance barrier rejects NEW-conversation sends through
+	// sessions.Create as serviceerrors.Unavailable. Preserve that specific,
+	// retryable rejection rather than collapsing it into a generic internal
+	// error — but only the maintenance signal, never arbitrary Unavailable
+	// causes (a backend outage must still read as internal).
+	if errors.Is(err, database.ErrAdmissionClosed) {
+		return a2atype.NewError(a2atype.ErrUnsupportedOperation, "session admission is closed for maintenance; retry after the drain reopens")
+	}
 	switch serviceerrors.CodeOf(err) {
 	case serviceerrors.CodeUnauthenticated:
 		return a2atype.ErrUnauthenticated

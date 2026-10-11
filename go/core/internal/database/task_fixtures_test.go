@@ -21,9 +21,9 @@ func saveRuntimeTask(t *testing.T, client *Client, sessionID string, task *a2a.T
 	stored, version, err := client.GetVersionedSessionTask(ctx, sessionID, string(task.ID))
 	digest := taskMutationHash(uuid.NewString())
 	if errors.Is(err, ErrNotFound) {
-		version, err = client.CreateRuntimeTask(ctx, sessionID, digest, task, "")
+		version, err = client.CreateRuntimeTask(ctx, sessionID, digest, task, "", nil)
 	} else if err == nil {
-		version, err = client.UpdateSessionTask(ctx, sessionID, version, digest, task, event, "")
+		version, err = client.UpdateSessionTask(ctx, sessionID, version, digest, task, event, "", nil)
 	}
 	if err != nil {
 		return err
@@ -32,7 +32,7 @@ func saveRuntimeTask(t *testing.T, client *Client, sessionID string, task *a2a.T
 	if !boundary {
 		return nil
 	}
-	if err := client.SettleSessionTask(ctx, sessionID, string(task.ID), version); err != nil {
+	if err := client.SettleSessionTask(ctx, sessionID, string(task.ID), version, nil); err != nil {
 		return err
 	}
 	work, err := client.ClaimSessionQuiescence(ctx)
@@ -88,7 +88,7 @@ func waitingTaskFixture(t *testing.T, client *Client) (*apiv1alpha1.Session, *a2
 	require.NoError(t, err)
 	task := newSessionTask(uuid.NewString(), "initial")
 	task.ContextID = session.ContextId
-	_, err = client.CreateRuntimeTask(t.Context(), session.Id, taskMutationHash("initial request"), task, "")
+	_, err = client.CreateRuntimeTask(t.Context(), session.Id, taskMutationHash("initial request"), task, "", nil)
 	require.NoError(t, err)
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateInputRequired, Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Which database?"))}
 	require.NoError(t, saveRuntimeTask(t, client, session.Id, task, task, nil))

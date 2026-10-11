@@ -52,3 +52,33 @@ func derefStr(s *string) string {
 	}
 	return ""
 }
+
+// nullString maps an empty string to NULL for columns that distinguish NULL
+// from empty (the provider-discriminated ActorTemplate identity). Returns the
+// string unchanged when non-empty.
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// revisionProvider normalizes the revision provider discriminator, defaulting
+// an empty value to Substrate so existing callers keep their provider.
+func revisionProvider(provider string) string {
+	if provider == "" {
+		return ExecutionProviderSubstrate
+	}
+	return provider
+}
+
+// revisionActorTemplateUID maps the ActorTemplate UID column: an E2B revision
+// stores NULL, while a Substrate revision stores the ” sentinel for "no UID
+// yet" as the original schema required (actor_template_uid NOT NULL DEFAULT
+// ”). Callers must not pass NULL for Substrate or ” for E2B.
+func revisionActorTemplateUID(provider, uid string) any {
+	if revisionProvider(provider) == ExecutionProviderE2B {
+		return nil
+	}
+	return uid
+}

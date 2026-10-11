@@ -62,6 +62,13 @@ func (c *Client) ForkSession(ctx context.Context, checkpointID, userID, requestI
 		if err != nil {
 			return err
 		}
+		// Only a Substrate checkpoint replays through the snapshot/Tag path.
+		// An E2B checkpoint's boundary is its /data archive, restored through
+		// the provider create path — forking it here would dereference NULL
+		// snapshot columns and bind nothing.
+		if checkpoint.Provider != ExecutionProviderSubstrate {
+			return fmt.Errorf("checkpoint %s is not a Substrate checkpoint: %w", checkpointID, ErrFailedPrecondition)
+		}
 		if checkpoint.PreparedRevision == nil {
 			return fmt.Errorf("checkpoint %s has no fork source", checkpointID)
 		}
@@ -87,6 +94,14 @@ func (c *Client) ForkSession(ctx context.Context, checkpointID, userID, requestI
 			Operation:        apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE,
 			CreatedAt:        now, UpdatedAt: now,
 		}
+		// A fork durably admits a NEW session, so it honors the maintenance
+		// barrier like insertSession does. It calls insertSessionRecords
+		// directly (not insertSession) to carry the source-checkpoint link, so
+		// the barrier check is repeated here inside the same transaction —
+		// keeping the close and the fork insert atomic on the barrier row.
+		if err := requireAdmissionsOpen(ctx, tx); err != nil {
+			return err
+		}
 		row, err = insertSessionRecords(ctx, tx, session, requestID, historyID, &checkpoint.ID)
 		if err != nil {
 			return err
@@ -104,9 +119,9 @@ func (c *Client) ForkSession(ctx context.Context, checkpointID, userID, requestI
 		if boundaryEvent.TaskID != checkpoint.HeadTaskID || boundaryEvent.SnapshotURI == nil {
 			return fmt.Errorf("checkpoint runtime boundary is inconsistent")
 		}
-		boundaryEvent.SnapshotAtespace = &checkpoint.SnapshotAtespace
-		boundaryEvent.SnapshotURI = &checkpoint.SnapshotURI
-		boundaryEvent.SnapshotContentScope = &checkpoint.SnapshotContentScope
+		boundaryEvent.SnapshotAtespace = checkpoint.SnapshotAtespace
+		boundaryEvent.SnapshotURI = checkpoint.SnapshotURI
+		boundaryEvent.SnapshotContentScope = checkpoint.SnapshotContentScope
 		tasks, err := replayTaskEvents(events, sourceContextID.String())
 		if err != nil {
 			return fmt.Errorf("replay checkpoint events: %w", err)
@@ -194,7 +209,7 @@ func (c *Client) ReserveSessionCheckpoint(ctx context.Context, checkpoint *apiv1
 	err = c.withTx(ctx, func(tx pgx.Tx) error {
 		existing, err := readCheckpointRequest(ctx, tx, userID, requestID)
 		if err == nil {
-			if existing.SourceSessionID != sourceID || existing.HeadTaskID != checkpoint.HeadTaskId {
+			if existing.Provider != ExecutionProviderSubstrate || existing.SourceSessionID != sourceID || existing.HeadTaskID != checkpoint.HeadTaskId {
 				return ErrIdempotencyConflict
 			}
 			snapshot = checkpointSnapshot(existing)
@@ -218,6 +233,16 @@ func (c *Client) ReserveSessionCheckpoint(ctx context.Context, checkpoint *apiv1
 		}
 		if session.State != apiv1alpha1.RuntimeState_RUNTIME_STATE_READY.String() || session.Operation != apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_NONE.String() {
 			return fmt.Errorf("session %s cannot checkpoint in state %s with operation %s: %w", checkpoint.GetSessionId(), session.State, session.Operation, ErrConflict)
+		}
+		// A session bound to E2B compute takes the archive checkpoint path,
+		// not the ate-api snapshot one. Reject here so it never becomes a
+		// Substrate checkpoint by defaulting to snapshot-pending.
+		binding, err := liveExecutionBindingForUpdate(ctx, tx, checkpoint.GetSessionId())
+		if err != nil {
+			return fmt.Errorf("get session execution binding: %w", err)
+		}
+		if binding != nil && binding.Provider == ExecutionProviderE2B {
+			return fmt.Errorf("session %s is bound to an E2B execution and cannot take a snapshot checkpoint: %w", checkpoint.GetSessionId(), ErrFailedPrecondition)
 		}
 		type head struct {
 			TaskID   string
@@ -289,7 +314,7 @@ func (c *Client) ReserveSessionCheckpoint(ctx context.Context, checkpoint *apiv1
 			    $10, $11, $12, 'CREATING')
 			ON CONFLICT DO NOTHING
 			RETURNING id, source_session_id, user_id, request_id, head_task_id, history_sequence, snapshot_atespace,
-			    snapshot_uri, snapshot_content_scope, tag_uid, state, data, source_history_id, prepared_revision
+			    snapshot_uri, snapshot_content_scope, tag_uid, provider, state, data, source_history_id, prepared_revision
 		`,
 			pgx.RowToStructByName[sessionCheckpointRow], checkpoint.GetId(),
 			checkpoint.GetSessionId(), userID, requestID, boundary.ID, *boundary.HistorySequence,
@@ -338,12 +363,15 @@ func (c *Client) FinalizeSessionCheckpoint(ctx context.Context, id, tagUID, snap
 		if err != nil {
 			return notFoundOr(err)
 		}
+		if row.Provider != ExecutionProviderSubstrate {
+			return fmt.Errorf("finalize Session checkpoint %s is not a Substrate checkpoint: %w", id, ErrNotFound)
+		}
 		result, err = toSessionCheckpoint(row)
 		if err != nil {
 			return err
 		}
 		if row.State != "CREATING" {
-			if (row.State == "READY" && row.TagUID == tagUID && row.SnapshotURI == snapshotURI && failure == "") ||
+			if (row.State == "READY" && deref(row.TagUID) == tagUID && deref(row.SnapshotURI) == snapshotURI && failure == "") ||
 				(row.State == "FAILED" && tagUID == "" && result.GetFailure().GetMessage() == failure) {
 				return nil
 			}
@@ -388,6 +416,9 @@ func (c *Client) GetSessionCheckpoint(ctx context.Context, id, userID string) (*
 	if err != nil {
 		return nil, fmt.Errorf("get Session checkpoint: %w", notFoundOr(err))
 	}
+	if row.Provider != ExecutionProviderSubstrate {
+		return nil, fmt.Errorf("get Session checkpoint %s: %w", id, notFoundOr(pgx.ErrNoRows))
+	}
 	return toSessionCheckpoint(row)
 }
 
@@ -400,18 +431,32 @@ func (c *Client) GetSessionCheckpointSnapshot(ctx context.Context, id, userID st
 	if err != nil {
 		return nil, "", fmt.Errorf("get checkpoint snapshot: %w", notFoundOr(err))
 	}
+	if row.Provider != ExecutionProviderSubstrate {
+		return nil, "", fmt.Errorf("get checkpoint snapshot %s: %w", id, notFoundOr(pgx.ErrNoRows))
+	}
 	if _, err := toSessionCheckpoint(row); err != nil {
 		return nil, "", err
 	}
-	return checkpointSnapshot(row), row.TagUID, nil
+	return checkpointSnapshot(row), deref(row.TagUID), nil
 }
 
 // checkpointSnapshot extracts the external snapshot reference without reading or
 // validating the external snapshot.
 func checkpointSnapshot(row sessionCheckpointRow) *SessionTaskSnapshot {
 	return &SessionTaskSnapshot{
-		Atespace: row.SnapshotAtespace, URI: row.SnapshotURI, ContentScope: row.SnapshotContentScope,
+		Atespace: deref(row.SnapshotAtespace), URI: deref(row.SnapshotURI), ContentScope: deref(row.SnapshotContentScope),
 	}
+}
+
+// deref collapses a nullable column to its empty-string form for the stringly
+// SessionTaskSnapshot/tag-UID surface. An E2B checkpoint's NULL snapshot and
+// tag read as empty, which is the same "no snapshot yet" signal a CREATING
+// Substrate row reports before its tag lands — never a fabricated identity.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // ListSessionCheckpoints returns an owner's READY checkpoints for the source
@@ -420,11 +465,12 @@ func checkpointSnapshot(row sessionCheckpointRow) *SessionTaskSnapshot {
 func (c *Client) ListSessionCheckpoints(ctx context.Context, sessionID, userID, afterID string, limit int) ([]*apiv1alpha1.Checkpoint, error) {
 	rows, err := queryMany(ctx, c.db, `
 		SELECT id, source_session_id, user_id, request_id, head_task_id, history_sequence, snapshot_atespace,
-		    snapshot_uri, snapshot_content_scope, tag_uid, state, data, source_history_id, prepared_revision
+		    snapshot_uri, snapshot_content_scope, tag_uid, provider, state, data, source_history_id, prepared_revision
 		FROM session_checkpoint
 		WHERE source_session_id = $1
 		  AND user_id = $2
 		  AND state = 'READY'
+		  AND provider = 'substrate'
 		  AND (NULLIF($3::text, '') IS NULL OR id > NULLIF($3::text, '')::uuid)
 		ORDER BY id
 		LIMIT $4
@@ -457,6 +503,9 @@ func (c *Client) BeginDeleteSessionCheckpoint(ctx context.Context, id, userID st
 		if err != nil {
 			return notFoundOr(err)
 		}
+		if row.Provider != ExecutionProviderSubstrate {
+			return fmt.Errorf("begin delete Session checkpoint %s: %w", id, notFoundOr(pgx.ErrNoRows))
+		}
 		checkpoint, err := toSessionCheckpoint(row)
 		if err != nil {
 			return err
@@ -481,7 +530,7 @@ func (c *Client) BeginDeleteSessionCheckpoint(ctx context.Context, id, userID st
 		if tag.RowsAffected() != 1 {
 			return ErrNotFound
 		}
-		snapshot, tagUID = checkpointSnapshot(row), row.TagUID
+		snapshot, tagUID = checkpointSnapshot(row), deref(row.TagUID)
 		return nil
 	})
 	if err != nil {
@@ -521,6 +570,9 @@ func (c *Client) UpdateCheckpointName(ctx context.Context, id, userID, name stri
 		row, err := lockCheckpoint(ctx, tx, id, false, userID, &ready)
 		if err != nil {
 			return notFoundOr(err)
+		}
+		if row.Provider != ExecutionProviderSubstrate {
+			return fmt.Errorf("rename Session checkpoint %s: %w", id, notFoundOr(pgx.ErrNoRows))
 		}
 		checkpoint, err := toSessionCheckpoint(row)
 		if err != nil {
@@ -576,10 +628,11 @@ type sessionCheckpointRow struct {
 	RequestID            string
 	HeadTaskID           string
 	HistorySequence      int64
-	SnapshotAtespace     string
-	SnapshotURI          string
-	SnapshotContentScope string
-	TagUID               string
+	SnapshotAtespace     *string
+	SnapshotURI          *string
+	SnapshotContentScope *string
+	TagUID               *string
+	Provider             string
 	State                string
 	Data                 []byte
 	SourceHistoryID      uuid.UUID
@@ -592,7 +645,7 @@ type sessionCheckpointRow struct {
 func lockCheckpoint(ctx context.Context, db pgx.Tx, id string, allUsers bool, userID string, state *string) (sessionCheckpointRow, error) {
 	return queryOne(ctx, db, `
 		SELECT id, source_session_id, user_id, request_id, head_task_id, history_sequence, snapshot_atespace,
-		    snapshot_uri, snapshot_content_scope, tag_uid, state, data, source_history_id, prepared_revision
+		    snapshot_uri, snapshot_content_scope, tag_uid, provider, state, data, source_history_id, prepared_revision
 		FROM session_checkpoint
 		WHERE id = $1
 		  -- Only internal finalization explicitly opts out of owner filtering.
@@ -640,7 +693,7 @@ func insertReplayedTask(ctx context.Context, db dbExecutor, task sessionTaskRow)
 func readCheckpoint(ctx context.Context, db dbExecutor, id, userID string, state *string) (sessionCheckpointRow, error) {
 	return queryOne(ctx, db, `
 		SELECT id, source_session_id, user_id, request_id, head_task_id, history_sequence, snapshot_atespace,
-		    snapshot_uri, snapshot_content_scope, tag_uid, state, data, source_history_id, prepared_revision
+		    snapshot_uri, snapshot_content_scope, tag_uid, provider, state, data, source_history_id, prepared_revision
 		FROM session_checkpoint
 		WHERE id = $1 AND user_id = $2
 		  -- Lifecycle work also reads creating and deleting checkpoints.
@@ -653,7 +706,7 @@ func readCheckpoint(ctx context.Context, db dbExecutor, id, userID string, state
 func readCheckpointRequest(ctx context.Context, db dbExecutor, userID, requestID string) (sessionCheckpointRow, error) {
 	return queryOne(ctx, db, `
 		SELECT id, source_session_id, user_id, request_id, head_task_id, history_sequence, snapshot_atespace,
-		    snapshot_uri, snapshot_content_scope, tag_uid, state, data, source_history_id, prepared_revision
+		    snapshot_uri, snapshot_content_scope, tag_uid, provider, state, data, source_history_id, prepared_revision
 		FROM session_checkpoint
 		WHERE user_id = $1 AND request_id = $2
 	`, pgx.RowToStructByName[sessionCheckpointRow], userID, requestID)

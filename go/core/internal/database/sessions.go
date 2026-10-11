@@ -128,6 +128,12 @@ func insertSession(ctx context.Context, db pgx.Tx, request *apiv1alpha1.Session,
 	session.Operation = apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE
 	session.CreatedAt = timestamppb.New(revision.DBTime)
 	session.UpdatedAt = timestamppb.New(revision.DBTime)
+	// New-session admission must honor the maintenance barrier before the row
+	// is durably inserted; this runs inside the caller's transaction so the
+	// close and the insert are atomic on the shared barrier row.
+	if err := requireAdmissionsOpen(ctx, db); err != nil {
+		return sessionRow{}, err
+	}
 	return insertSessionRecords(ctx, db, session, requestID, historyID, nil)
 }
 

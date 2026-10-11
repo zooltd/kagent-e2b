@@ -9,8 +9,12 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -18,14 +22,35 @@ import (
 // permission tests fails immediately through the nil dependencies.
 type interactionTestStore struct {
 	*database.Client
-	task        *a2atype.Task
-	taskLookups int
-	taskReads   int
+	task             *a2atype.Task
+	taskLookups      int
+	taskReads        int
+	reserveErr       error
+	admissionsClosed bool
+	admissionsErr    error
+	admissionReads   int
+}
+
+// CheckAdmissionsOpen reports the test's barrier state; the embedded nil
+// *database.Client would panic if reached.
+func (s *interactionTestStore) CheckAdmissionsOpen(context.Context) error {
+	s.admissionReads++
+	if s.admissionsErr != nil {
+		return s.admissionsErr
+	}
+	if s.admissionsClosed {
+		return database.ErrAdmissionClosed
+	}
+	return nil
 }
 
 func (s *interactionTestStore) SessionForTask(context.Context, string) (string, error) {
 	s.taskLookups++
 	return s.task.ContextID, nil
+}
+
+func (s *interactionTestStore) ReserveSessionDispatch(context.Context, string, uuid.UUID, string) error {
+	return s.reserveErr
 }
 
 func (s *interactionTestStore) GetSessionTask(context.Context, string, string, *int) (*a2atype.Task, error) {
@@ -159,4 +184,61 @@ func TestInteractionsRequireAgentForUnfilteredTaskList(t *testing.T) {
 			t.Fatalf("ListTasks(%v) = %v, want invalid Agent before storage", agent, err)
 		}
 	}
+}
+
+// admissionClosedAgentService resolves any Agent reference so a send reaches
+// session creation rather than failing at Agent lookup.
+type admissionClosedAgentService struct{ err error }
+
+func (s admissionClosedAgentService) Get(_ context.Context, ref types.NamespacedName) (*v1alpha3.Agent, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &v1alpha3.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, Name: ref.Name}}, nil
+}
+
+// TestNewConversationSendPreservesAdmissionClosed proves a send with no
+// TaskID/ContextID — which resolves its session through sessions.Create — keeps
+// the specific maintenance rejection instead of collapsing into ErrInternalError.
+// A closed barrier returns ErrUnavailable-wrapped ErrAdmissionClosed from
+// Create; interactionError must surface it as retryable UnsupportedOperation.
+// Ordinary and streaming sends share resolveSend/PrepareSend, so one call covers
+// the new-conversation branch both transports take.
+func TestNewConversationSendPreservesAdmissionClosed(t *testing.T) {
+	agent := types.NamespacedName{Namespace: "team-a", Name: "assistant"}
+	sessionStore := &serviceTestStore{createErr: database.ErrAdmissionClosed}
+	sessions := NewService(sessionStore, serviceTestAuthorizer{}, serviceTestWorkflow{})
+	service := NewInteractionService(&interactionTestStore{}, admissionClosedAgentService{}, sessions)
+	// A request without a task or context ID is the new-conversation branch that
+	// calls sessions.Create.
+	_, err := service.PrepareSend(serviceTestContext("alice"), agent,
+		&a2atype.SendMessageRequest{Message: &a2atype.Message{ID: "first", Role: a2atype.MessageRoleUser}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, a2atype.ErrUnsupportedOperation)
+	assert.ErrorContains(t, err, "admission is closed for maintenance",
+		"new-conversation send must surface the maintenance signal, not internal error")
+}
+
+// TestExistingConversationSendPreservesAdmissionClosed is the complement: an
+// existing-context send already reached the maintenance message through
+// interactionStoreError; confirm both paths report the same rejection.
+func TestExistingConversationSendPreservesAdmissionClosed(t *testing.T) {
+	agent := types.NamespacedName{Namespace: "team-a", Name: "assistant"}
+	ctxID := uuid.NewString()
+	tasks := &interactionTestStore{task: &a2atype.Task{ID: "task", ContextID: ctxID}}
+	tasks.reserveErr = database.ErrAdmissionClosed
+	// The existing-context branch resolves the session via storedSession, which
+	// requires a READY session whose ContextId and Agent match the request.
+	ready := &apiv1alpha1.Session{
+		Id: ctxID, ContextId: ctxID,
+		State:     apiv1alpha1.RuntimeState_RUNTIME_STATE_READY,
+		Operation: apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_NONE,
+		Agent:     &apiv1alpha1.ResourceReference{Namespace: agent.Namespace, Name: agent.Name},
+	}
+	sessions := NewService(&serviceTestStore{getResult: ready}, serviceTestAuthorizer{}, serviceTestWorkflow{})
+	service := NewInteractionService(tasks, admissionClosedAgentService{}, sessions)
+	_, err := service.PrepareSend(serviceTestContext("alice"), agent,
+		&a2atype.SendMessageRequest{Message: &a2atype.Message{ID: "input", ContextID: ctxID}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, a2atype.ErrUnsupportedOperation)
 }
