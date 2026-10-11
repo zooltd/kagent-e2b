@@ -9,6 +9,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1062,43 +1063,27 @@ func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
 		writeErr <- err
 	}()
 
-	// Give the writer a moment to take the session lock and queue on binding.
-	select {
-	case err := <-writeErr:
-		t.Fatalf("write completed while binding row held (impossible unless it skipped the binding lock): %v", err)
-	case <-time.After(300 * time.Millisecond):
-		// Still blocked on the binding lock — writer is queued behind A.
-	}
+	// Observe the writer actually blocked on the binding row lock A holds —
+	// explicit pg_stat_activity evidence, not a fixed sleep. At that point it
+	// already holds the session lock (session-first order).
+	waitForBlockedQuery(t, client.db, ctx,
+		"%SELECT id FROM execution_instance_binding%FOR UPDATE%")
 
-	// While the writer holds the session lock (queued on the binding lock A
-	// holds), probe whether the session row is lock-free. session_record is a
-	// view, so NOWAIT must target the base runtime_instance row lockSession
-	// actually locks. The probe needs its own transaction — pgx transactions
-	// are not goroutine-safe, so txA cannot be queried from another goroutine.
-	// A dedicated probe tx waits on the binding lock A holds, which is fine:
-	// NOWAIT on the session row reports immediately regardless.
-	probeDone := make(chan bool, 1)
-	go func() {
-		txB, err := client.db.Begin(ctx)
-		if err != nil {
-			probeDone <- false
-			return
-		}
-		defer txB.Rollback(ctx) //nolint:errcheck
-		var lockedID uuid.UUID
-		serr := txB.QueryRow(ctx, `
-			SELECT id FROM runtime_instance WHERE id = $1 FOR UPDATE NOWAIT
-		`, session.Id).Scan(&lockedID)
-		// NOWAIT failing means the writer holds the session lock while queued
-		// on the binding => it acquired session FIRST. Confirmed.
-		probeDone <- serr != nil
-	}()
-	var sessionLocked bool
-	select {
-	case sessionLocked = <-probeDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("session-lock probe did not complete — possible lock inversion")
-	}
+	// Probe the session row NOWAIT from a separate transaction. pgx txs are
+	// not goroutine-safe, so txB runs synchronously here rather than racing
+	// txA from a goroutine. NOWAIT must fail with SQLSTATE 55P03
+	// (lock_not_available) — the writer holds the session lock while queued on
+	// the binding => it acquired session FIRST. Any other result fails.
+	txB, err := client.db.Begin(ctx)
+	require.NoError(t, err)
+	defer txB.Rollback(ctx) //nolint:errcheck
+	var lockedID uuid.UUID
+	serr := txB.QueryRow(ctx, `
+		SELECT id FROM runtime_instance WHERE id = $1 FOR UPDATE NOWAIT
+	`, session.Id).Scan(&lockedID)
+	var pgErr *pgconn.PgError
+	require.True(t, errors.As(serr, &pgErr) && pgErr.Code == "55P03",
+		"session lock probe must report lock_not_available (writer holds session lock), got %v", serr)
 
 	require.NoError(t, txA.Rollback(ctx))
 	select {
@@ -1112,8 +1097,6 @@ func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("writer did not complete after binding lock released — possible lock inversion")
 	}
-	require.True(t, sessionLocked,
-		"writer held the session lock while queued on the binding lock — session-first order confirmed")
 }
 
 // FailE2BSessionCreate must only resolve a real issued attempt. A missing

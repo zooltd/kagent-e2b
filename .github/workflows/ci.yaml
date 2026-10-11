@@ -50,6 +50,9 @@ jobs:
           echo "key=${BRANCH_KEY}" >> $GITHUB_OUTPUT
           echo "::notice title=Cache Key::Branch: ${BRANCH_KEY}"
   test-e2e:
+    # Blacksmith runners only exist on the upstream repo; skip on forks so
+    # queued jobs do not hang fork CI. See the runner labels below.
+    if: github.repository == 'kagent-dev/kagent'
     strategy:
       fail-fast: false
       matrix:
@@ -292,6 +295,7 @@ jobs:
         run: make semconv-verify
 
   upgrade-tests:
+    if: github.repository == 'kagent-dev/kagent'
     needs:
       - setup
     env:
@@ -339,6 +343,7 @@ jobs:
           kubectl logs -n kagent deployment/kagent-controller || true
 
   rolling-upgrade-tests:
+    if: github.repository == 'kagent-dev/kagent'
     needs:
       - setup
     env:
@@ -437,6 +442,7 @@ jobs:
           helm unittest helm/tools/grafana-mcp
 
   ui-tests:
+    if: github.repository == 'kagent-dev/kagent'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -491,6 +497,7 @@ jobs:
 
   # This job builds the Docker images for the controller, UI, ADKs, and CLI on arm64.
   build:
+    if: github.repository == 'kagent-dev/kagent'
     env:
       VERSION: v0.0.1-test
     strategy:
