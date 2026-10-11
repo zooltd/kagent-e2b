@@ -298,6 +298,7 @@ func (f *fakeActorTemplates) DeleteActorTemplate(context.Context, string, string
 type fakeRuntimeRevisionStore struct {
 	pair             *database.AgentDefinition
 	revision         *database.RuntimeRevision
+	e2bRevision      *database.E2BRuntimeRevisionInput
 	markedSuccessful bool
 	retired          string
 	revisionErr      error
@@ -316,6 +317,15 @@ func (s *fakeRuntimeRevisionStore) RecordRuntimeRevision(_ context.Context, revi
 		return s.revisionErr
 	}
 	s.revision = &revision
+	s.markedSuccessful = ready
+	return nil
+}
+
+func (s *fakeRuntimeRevisionStore) RecordE2BRuntimeRevision(_ context.Context, in database.E2BRuntimeRevisionInput, ready bool) error {
+	if s.revisionErr != nil {
+		return s.revisionErr
+	}
+	s.e2bRevision = &in
 	s.markedSuccessful = ready
 	return nil
 }
@@ -368,6 +378,7 @@ func TestReconcilerUpdatesModelConfigStatusOnSecretHashChange(t *testing.T) {
 		&fakeActorTemplates{},
 		&fakeRuntimeRevisionStore{},
 		statusClient,
+		nil,
 	)
 
 	go reconciler.Run(stop)
@@ -432,4 +443,62 @@ func TestReconciliationQueueRetriesWithBackoff(t *testing.T) {
 		cancel()
 		require.NoError(t, queue.WaitForClose(time.Second))
 	})
+}
+
+// TestE2BReconciliationPromotesOnlyVerifiedArtifact drives the E2B reconcile
+// path end to end through reconcileAgent: an unready artifact must not promote
+// the revision nor mark it successful, a ready artifact must do both, and the
+// resolved non-secret environment must reach the recorded binding.
+func TestE2BReconciliationPromotesOnlyVerifiedArtifact(t *testing.T) {
+	ctx := context.Background()
+	env := []kagentv1alpha3.RuntimeEnvVar{
+		{Name: "ANTHROPIC_BASE_URL", Value: "http://broker:1"},
+		{Name: "AUTHORED_FLAG", Value: "on"},
+	}
+	collections, _ := newE2BPreparationTestCollections(t, env)
+	state := collections.Reconciliations.List()[0]
+	store := &fakeRuntimeRevisionStore{}
+
+	// Artifact not ready -> recorded unpromoted, no success mark.
+	ready := false
+	reconciler := newReconciler(collections, &fakeActorTemplates{}, store,
+		kagentfake.NewSimpleClientset().ApiV1alpha3(),
+		func(context.Context, string, string, string) (bool, error) { return ready, nil })
+	// An unready artifact returns a retryable error so the queue re-checks it.
+	require.Error(t, reconciler.reconcileAgent(ctx, state.ResourceName()))
+	require.NotNil(t, store.e2bRevision, "E2B revision must be recorded")
+	require.False(t, store.markedSuccessful, "unready artifact must not promote")
+	obs := collections.AgentRuntimeObservations.GetKey(state.ResourceName())
+	require.NotNil(t, obs, "a preparation observation must be published")
+	require.False(t, obs.E2BReady)
+
+	// Now ready -> promoted, observation ready, environment carried through.
+	ready = true
+	require.NoError(t, reconciler.reconcileAgent(ctx, state.ResourceName()))
+	require.True(t, store.markedSuccessful, "verified artifact must promote")
+	require.NotNil(t, store.e2bRevision.Environment)
+	require.Equal(t, "http://broker:1", store.e2bRevision.Environment["ANTHROPIC_BASE_URL"])
+	require.Equal(t, "on", store.e2bRevision.Environment["AUTHORED_FLAG"])
+	obs = collections.AgentRuntimeObservations.GetKey(state.ResourceName())
+	require.NotNil(t, obs)
+	require.True(t, obs.E2BReady, "ready artifact must publish a ready observation")
+}
+
+// TestE2BReconciliationUnverifiableArtifactStaysPending asserts a failing
+// readiness check leaves the revision unpromoted and reports a retryable
+// preparation failure rather than promoting blind.
+func TestE2BReconciliationUnverifiableArtifactStaysPending(t *testing.T) {
+	ctx := context.Background()
+	collections, _ := newE2BPreparationTestCollections(t, nil)
+	state := collections.Reconciliations.List()[0]
+	store := &fakeRuntimeRevisionStore{}
+	reconciler := newReconciler(collections, &fakeActorTemplates{}, store,
+		kagentfake.NewSimpleClientset().ApiV1alpha3(),
+		func(context.Context, string, string, string) (bool, error) { return false, errors.New("api down") })
+	require.Error(t, reconciler.reconcileAgent(ctx, state.ResourceName()))
+	require.False(t, store.markedSuccessful, "unverifiable artifact must not promote")
+	obs := collections.AgentRuntimeObservations.GetKey(state.ResourceName())
+	require.NotNil(t, obs)
+	require.NotNil(t, obs.Failure, "a failed check must publish a preparation failure")
+	require.True(t, obs.Failure.Retryable)
 }

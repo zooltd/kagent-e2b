@@ -276,3 +276,15 @@ func TestSandboxConflictingRequestCanRetryAfterActiveAttempt(t *testing.T) {
 	require.Equal(t, apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_NONE, current.Operation)
 	require.Equal(t, []string{"create", "policy", "resume", "suspend", "resume"}, actors.observedCalls())
 }
+
+// In E2B-only mode the standalone sandbox service is disabled: Create and guest
+// operations return FailedPrecondition rather than driving a Substrate runtime
+// that does not exist.
+func TestSandboxServiceDisabledInE2BOnlyMode(t *testing.T) {
+	service, ctx, _ := serviceFixture(t)
+	service.config.Disabled = true
+	_, err := service.Create(ctx, createRequest())
+	require.Error(t, err, "disabled service rejects create")
+	_, _, err = service.guestAccess(ctx, "00000000-0000-0000-0000-000000000001", auth.VerbGet)
+	require.Error(t, err, "disabled service rejects guest access")
+}

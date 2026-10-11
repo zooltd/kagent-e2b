@@ -24,14 +24,30 @@ _PRODUCER = "kagent.task_store.producer"
 _FAILED_SAVE = "kagent.task_store.failed_save"
 _IDENTITY_PATH = Path("/run/kagent/identity/name")
 _DISPATCH_HEADER = "x-kagent-dispatch-id"
+_INSECURE_IDENTITY_HEADER = "x-kagent-insecure-runtime-identity"
+_AUTHORIZATION_HEADER = "authorization"
 
 
 class KAgentTaskStore(TaskStore):
-    """Persist SDK tasks over gRPC with request-local optimistic versions."""
+    """Persist SDK tasks over gRPC with request-local optimistic versions.
 
-    def __init__(self, client: AsyncControllerClient, identity_path: Path = _IDENTITY_PATH) -> None:
+    ``credential_path`` selects the runtime authentication mode. When set the
+    store presents a signed Bearer credential read from that file on every call
+    and never sends the insecure Substrate identity header; when unset it keeps
+    the temporary insecure identity transport used on Substrate (#1660). The
+    credential is reread on each call so a renewed same-generation credential
+    is picked up without restart, matching the Go ADK's signed store.
+    """
+
+    def __init__(
+        self,
+        client: AsyncControllerClient,
+        identity_path: Path = _IDENTITY_PATH,
+        credential_path: Path | None = None,
+    ) -> None:
         self.client = client
         self.identity_path = identity_path
+        self.credential_path = credential_path
         self._executions: dict[str, asyncio.Event] = {}
         self._execution_lock = asyncio.Lock()
 
@@ -42,12 +58,7 @@ class KAgentTaskStore(TaskStore):
         return str(UUID(name.removeprefix("session-")))
 
     async def _call(self, method, request):
-        # Temporary identity transport until Substrate injects actor credentials (#1660).
-        # Reread on every call because restore rebinds these files to the new actor.
-        identity = []
-        for field in ("atespace", "name", "uid"):
-            identity.append((await asyncio.to_thread((self.identity_path.parent / field).read_text)).strip())
-        metadata = (("x-kagent-insecure-runtime-identity", "/".join(identity)),)
+        metadata = await self._auth_metadata()
         for attempt in range(4):
             try:
                 return await method(
@@ -60,6 +71,28 @@ class KAgentTaskStore(TaskStore):
                     raise
                 await asyncio.sleep(0.1 * 2**attempt)
         raise AssertionError("unreachable")
+
+    async def _auth_metadata(self):
+        """Build the per-call authentication metadata for the selected mode.
+
+        Signed-credential mode (E2B) presents only the issued credential as a
+        bearer token — never the insecure identity header — and fails closed on
+        a missing or empty credential. Substrate mode rereads the insecure
+        identity fields on every call because restore rebinds them to the new
+        actor.
+        """
+        if self.credential_path is not None:
+            try:
+                credential = (await asyncio.to_thread(self.credential_path.read_text)).strip()
+            except OSError as error:
+                raise InternalError("read runtime credential") from error
+            if not credential:
+                raise InternalError("runtime credential is empty")
+            return ((_AUTHORIZATION_HEADER, f"Bearer {credential}"),)
+        identity = []
+        for field in ("atespace", "name", "uid"):
+            identity.append((await asyncio.to_thread((self.identity_path.parent / field).read_text)).strip())
+        return ((_INSECURE_IDENTITY_HEADER, "/".join(identity)),)
 
     async def save(self, task: a2a_pb2.Task, context: ServerCallContext) -> None:
         if failure := context.state.get(_FAILED_SAVE):

@@ -107,7 +107,7 @@ func TestRuntimeRevisionCollectionPreservesSessionAndCheckpoint(t *testing.T) {
 	assertRetained()
 	task := newSessionTask("task", "message")
 	task.ContextID = session.GetContextId()
-	_, err = client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("request"), task, "")
+	_, err = client.CreateRuntimeTask(ctx, session.GetId(), taskMutationHash("request"), task, "", nil)
 	require.NoError(t, err)
 	task.Status.State = a2a.TaskStateCompleted
 	require.NoError(t, saveRuntimeTask(t, client, session.GetId(), task, task,

@@ -73,6 +73,9 @@ func (d *GuestDialer) context(ctx context.Context, instance *apiv1alpha1.Sandbox
 }
 
 func (s *Service) guestAccess(ctx context.Context, id string, verb auth.Verb) (context.Context, context.CancelFunc, error) {
+	if s.config.Disabled {
+		return nil, nil, serviceerrors.NewFailedPrecondition("guest operations are not supported by the configured runtime provider", database.ErrFailedPrecondition)
+	}
 	if err := uuid.Validate(id); err != nil {
 		return nil, nil, serviceerrors.NewInvalidArgument("Sandbox ID must be a UUID", err)
 	}

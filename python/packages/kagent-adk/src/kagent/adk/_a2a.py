@@ -4,6 +4,7 @@ import faulthandler
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 import grpc
@@ -146,7 +147,17 @@ class KAgentApp:
                 memory_service=memory_service,
             )
 
-        task_store = KAgentTaskStore(controller_client) if controller_client else InMemoryTaskStore()
+        # KAGENT_RUNTIME_CREDENTIAL_PATH selects the signed-credential mode the
+        # E2B execution provider uses: the store then presents the issued
+        # bearer credential on every TaskStore call instead of the insecure
+        # Substrate identity header. Substrate leaves it unset and keeps the
+        # temporary identity transport.
+        credential_path = os.getenv("KAGENT_RUNTIME_CREDENTIAL_PATH") or None
+        task_store = (
+            KAgentTaskStore(controller_client, credential_path=Path(credential_path) if credential_path else None)
+            if controller_client
+            else InMemoryTaskStore()
+        )
 
         agent_executor = A2aAgentExecutor(
             runner=create_runner,
@@ -180,6 +191,11 @@ class KAgentApp:
 
         # Health check/readiness probe
         app.add_route("/health", methods=["GET"], route=health_check)
+        # /readyz on the main HTTP app reports 200 only once lifespan startup
+        # has completed (FastAPI does not serve routes until then). The
+        # production E2B readiness probe dials this path on the ingress port;
+        # the raw-socket 8081 listener remains for pre-HTTP readiness.
+        app.add_route("/readyz", methods=["GET"], route=health_check)
         app.add_route("/thread_dump", methods=["GET"], route=thread_dump)
         add_a2a_routes_to_fastapi(
             app,

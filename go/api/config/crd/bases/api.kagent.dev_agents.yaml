@@ -196,8 +196,12 @@ spec:
                           rule: self.modelConfigRef.name.size() > 0
                     type: object
                   substrate:
-                    description: RuntimeSubstratePolicy contains the Substrate policy
-                      shared by all runtime variants.
+                    description: |-
+                      Substrate holds the Substrate placement policy. It is optional: under the
+                      Substrate provider compilation requires it and reports a validation
+                      error when absent; under E2B it is inactive and excluded from execution
+                      identity, so an E2B-only Harness leaves it unset rather than inventing a
+                      WorkerPool.
                     properties:
                       snapshotPolicy:
                         description: SnapshotPolicy configures runtime snapshot storage.
@@ -258,7 +262,6 @@ spec:
                     - image
                     type: object
                 required:
-                - substrate
                 - workload
                 type: object
                 x-kubernetes-validations:

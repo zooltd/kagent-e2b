@@ -22,11 +22,13 @@ import (
 )
 
 type Store interface {
-	SettleSessionTask(context.Context, string, string, int64) error
+	SettleSessionTask(context.Context, string, string, int64, *database.ExecutionInstanceBinding) error
 	GetSessionForRuntime(context.Context, string, string) (*apiv1alpha1.Session, error)
-	CreateRuntimeTask(context.Context, string, []byte, *a2a.Task, string) (int64, error)
+	GetSessionForExecution(context.Context, string) (*apiv1alpha1.Session, error)
+	GetLiveExecutionBinding(context.Context, string) (*database.ExecutionInstanceBinding, error)
+	CreateRuntimeTask(context.Context, string, []byte, *a2a.Task, string, *database.ExecutionInstanceBinding) (int64, error)
 	GetVersionedSessionTask(context.Context, string, string) (*a2a.Task, int64, error)
-	UpdateSessionTask(context.Context, string, int64, []byte, *a2a.Task, a2a.Event, string) (int64, error)
+	UpdateSessionTask(context.Context, string, int64, []byte, *a2a.Task, a2a.Event, string, *database.ExecutionInstanceBinding) (int64, error)
 	ListSessionTasks(context.Context, string, string, a2a.TaskState, *time.Time, int, *int) ([]*a2a.Task, int, error)
 }
 
@@ -40,26 +42,61 @@ func NewService(store Store) *Service {
 	return &Service{store: store}
 }
 
-func (s *Service) session(ctx context.Context, sessionID string) (*apiv1alpha1.Session, error) {
+// session verifies the caller's runtime authority for sessionID and returns
+// the session plus the live execution binding the caller was authorized under.
+// The binding is nil for the Substrate path; runtime write methods pass it back
+// to the store so revocation is rechecked inside the mutation transaction.
+func (s *Service) session(ctx context.Context, sessionID string) (*apiv1alpha1.Session, *database.ExecutionInstanceBinding, error) {
 	authSession, _ := auth.AuthSessionFrom(ctx)
+	// Dispatch on the verified identity type. Substrate's runtimeSession keeps
+	// its actor UID + authority checks; a signed E2B e2bSession checks the
+	// durable execution binding instead.
+	if e2b, ok := authSession.(e2bSession); ok {
+		return s.e2bSession(ctx, e2b, sessionID)
+	}
 	identity, ok := authSession.(runtimeSession)
 	if !ok || identity.sessionID != sessionID {
-		return nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
+		return nil, nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
 	}
 	session, err := s.store.GetSessionForRuntime(ctx, sessionID, identity.actorUID)
 	if err != nil {
-		return nil, storageError(err)
+		return nil, nil, storageError(err)
 	}
 	if session.A2AAuthority != substrate.ActorHost(identity.atespace, substrate.ActorName(sessionID), "") {
-		return nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
+		return nil, nil, status.Error(codes.PermissionDenied, "actor does not belong to this session")
 	}
-	return session, nil
+	return session, nil, nil
+}
+
+// e2bSession authorizes a signed E2B runtime credential against the durable
+// execution binding. The credential's session, external compute and generation
+// must all match the live binding; there is no Substrate actor fallback.
+func (s *Service) e2bSession(ctx context.Context, identity e2bSession, sessionID string) (*apiv1alpha1.Session, *database.ExecutionInstanceBinding, error) {
+	if identity.sessionID != sessionID {
+		return nil, nil, status.Error(codes.PermissionDenied, "runtime does not belong to this session")
+	}
+	binding, err := s.store.GetLiveExecutionBinding(ctx, sessionID)
+	if err != nil {
+		return nil, nil, storageError(err)
+	}
+	if binding.Provider != database.ExecutionProviderE2B ||
+		binding.Installation != identity.installation ||
+		binding.ExternalID != identity.externalID ||
+		binding.Generation != identity.generation {
+		return nil, nil, status.Error(codes.PermissionDenied, "runtime credential does not match the bound execution instance")
+	}
+	session, err := s.store.GetSessionForExecution(ctx, sessionID)
+	if err != nil {
+		return nil, nil, storageError(err)
+	}
+	return session, binding, nil
 }
 
 // CreateTask persists the SDK's first task snapshot. Runtime execution and
 // request serialization remain owned by the agent's SDK.
 func (s *Service) CreateTask(ctx context.Context, input *apiv1alpha1.TaskStoreServiceCreateTaskRequest) (*apiv1alpha1.TaskStoreServiceCreateTaskResponse, error) {
-	if _, err := s.session(ctx, input.SessionId); err != nil {
+	_, binding, err := s.session(ctx, input.SessionId)
+	if err != nil {
 		return nil, err
 	}
 	task, err := pbconv.FromProtoTask(input.Task)
@@ -71,12 +108,12 @@ func (s *Service) CreateTask(ctx context.Context, input *apiv1alpha1.TaskStoreSe
 		return nil, err
 	}
 	hash := sha256.Sum256(data)
-	version, err := s.store.CreateRuntimeTask(ctx, input.SessionId, hash[:], task, input.GetDispatchId())
+	version, err := s.store.CreateRuntimeTask(ctx, input.SessionId, hash[:], task, input.GetDispatchId(), binding)
 	return &apiv1alpha1.TaskStoreServiceCreateTaskResponse{Version: version}, storageError(err)
 }
 
 func (s *Service) GetTask(ctx context.Context, input *apiv1alpha1.TaskStoreServiceGetTaskRequest) (*apiv1alpha1.TaskStoreServiceGetTaskResponse, error) {
-	if _, err := s.session(ctx, input.SessionId); err != nil {
+	if _, _, err := s.session(ctx, input.SessionId); err != nil {
 		return nil, err
 	}
 	stored, err := s.getTask(ctx, input.SessionId, input.TaskId)
@@ -93,7 +130,8 @@ func (s *Service) getTask(ctx context.Context, sessionID, taskID string) (*apiv1
 }
 
 func (s *Service) UpdateTask(ctx context.Context, input *apiv1alpha1.TaskStoreServiceUpdateTaskRequest) (*apiv1alpha1.TaskStoreServiceUpdateTaskResponse, error) {
-	if _, err := s.session(ctx, input.SessionId); err != nil {
+	_, binding, err := s.session(ctx, input.SessionId)
+	if err != nil {
 		return nil, err
 	}
 	task, err := pbconv.FromProtoTask(input.Task)
@@ -112,12 +150,12 @@ func (s *Service) UpdateTask(ctx context.Context, input *apiv1alpha1.TaskStoreSe
 		return nil, err
 	}
 	hash := sha256.Sum256(data)
-	version, err := s.store.UpdateSessionTask(ctx, input.SessionId, input.ExpectedVersion, hash[:], task, event, input.GetDispatchId())
+	version, err := s.store.UpdateSessionTask(ctx, input.SessionId, input.ExpectedVersion, hash[:], task, event, input.GetDispatchId(), binding)
 	return &apiv1alpha1.TaskStoreServiceUpdateTaskResponse{Version: version}, storageError(err)
 }
 
 func (s *Service) ListTasks(ctx context.Context, input *apiv1alpha1.TaskStoreServiceListTasksRequest) (*apiv1alpha1.TaskStoreServiceListTasksResponse, error) {
-	session, err := s.session(ctx, input.SessionId)
+	session, _, err := s.session(ctx, input.SessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -161,10 +199,11 @@ func (s *Service) ListTasks(ctx context.Context, input *apiv1alpha1.TaskStoreSer
 }
 
 func (s *Service) SettleTask(ctx context.Context, input *apiv1alpha1.TaskStoreServiceSettleTaskRequest) (*apiv1alpha1.TaskStoreServiceSettleTaskResponse, error) {
-	if _, err := s.session(ctx, input.SessionId); err != nil {
+	_, binding, err := s.session(ctx, input.SessionId)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.store.SettleSessionTask(ctx, input.SessionId, input.TaskId, input.Version); err != nil {
+	if err := s.store.SettleSessionTask(ctx, input.SessionId, input.TaskId, input.Version, binding); err != nil {
 		return nil, storageError(err)
 	}
 	return &apiv1alpha1.TaskStoreServiceSettleTaskResponse{}, nil

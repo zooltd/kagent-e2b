@@ -238,5 +238,9 @@ func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
+		// The listener wraps conns in TLS before http.Server sees them, so
+		// http.Server never fills ALPN itself. gRPC requires the h2 protocol
+		// token; without it TLS clients that enforce ALPN fail the handshake.
+		NextProtos: []string{"h2", "http/1.1"},
 	}, nil
 }

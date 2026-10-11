@@ -17,6 +17,7 @@ import (
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
+	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -276,7 +277,7 @@ func TestPreparationQueueAndPollerBackoff(t *testing.T) {
 				initial := collections.Reconciliations.List()[0]
 				statusClient := kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3()
 				backend := &preparationTestBackend{templates: &test.templates, store: &test.store}
-				r := newReconciler(collections, backend, backend, statusClient)
+				r := newReconciler(collections, backend, backend, statusClient, nil)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				go r.Run(ctx.Done())
@@ -391,6 +392,12 @@ func (p *preparationTestBackend) RecordRuntimeRevision(ctx context.Context, revi
 	return p.store.RecordRuntimeRevision(ctx, revision, ready)
 }
 
+func (p *preparationTestBackend) RecordE2BRuntimeRevision(ctx context.Context, in database.E2BRuntimeRevisionInput, ready bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.store.RecordE2BRuntimeRevision(ctx, in, ready)
+}
+
 func (p *preparationTestBackend) RetireAgentIdentities(ctx context.Context, namespace, name string, except *database.AgentDefinition) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -403,7 +410,7 @@ func TestPreparationDesiredChangesBypassBackoff(t *testing.T) {
 		initial := collections.Reconciliations.List()[0]
 		templates := &fakeActorTemplates{createErr: status.Error(codes.FailedPrecondition, "missing config")}
 		store := &fakeRuntimeRevisionStore{}
-		r := newReconciler(collections, templates, store, kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3())
+		r := newReconciler(collections, templates, store, kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3(), nil)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		go r.Run(ctx.Done())
@@ -457,7 +464,7 @@ func TestPreparationTerminalFailures(t *testing.T) {
 				}
 				store := &fakeRuntimeRevisionStore{}
 				statusClient := kagentfake.NewSimpleClientset(initial.Agent.DeepCopy()).ApiV1alpha3()
-				r := newReconciler(collections, templates, store, statusClient)
+				r := newReconciler(collections, templates, store, statusClient, nil)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				go r.Run(ctx.Done())
@@ -537,7 +544,7 @@ func newPreparationTestCollections(t *testing.T, workerPool string) (Collections
 	runtimeHarness.Spec.BYO = &kagentv1alpha3.BYOHarness{}
 	runtimeHarness.Spec.Workload.Image = "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	runtimeHarness.Spec.Workload.Command = []string{"/agent"}
-	runtimeHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
+	runtimeHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
 		WorkerPoolRef: corev1.LocalObjectReference{Name: workerPool}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
 	}
 	harnesses := krt.NewStaticCollection(nil, []*kagentv1alpha3.Harness{runtimeHarness}, opts.WithName("Harnesses")...)
@@ -562,11 +569,65 @@ func newPreparationTestCollections(t *testing.T, workerPool string) (Collections
 		Harnesses: collections.Harnesses, AgentTemplates: collections.AgentTemplates, ResolvedModelConfigs: collections.ResolvedModelConfigs,
 		RemoteMCPServers: collections.RemoteMCPServers, ConfigMaps: collections.ConfigMaps,
 		Secrets: collections.Secrets, WorkerPools: collections.WorkerPools,
-	}, collections.AgentRuntimeObservations, opts)
+	}, collections.AgentRuntimeObservations, opts, "", nil, "")
 	collections.AgentStatuses = newAgentStatuses(collections.Agents, collections.Reconciliations, opts)
 	waitFor(t, func() bool {
 		states := collections.Reconciliations.List()
 		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil
+	})
+	return collections, harnesses
+}
+
+// newE2BPreparationTestCollections builds the same graph but compiled for the
+// E2B provider: the Harness still carries an (inactive) Substrate policy, and
+// the installation maps the workload image to a template/build/contract. The
+// returned Collections produce E2B-bound targets, never ActorTemplates.
+func newE2BPreparationTestCollections(t *testing.T, environment []kagentv1alpha3.RuntimeEnvVar) (Collections, krt.StaticCollection[*kagentv1alpha3.Harness]) {
+	t.Helper()
+	opts := krt.NewOptionsBuilder(t.Context().Done(), "test-e2b-preparation", nil)
+	template := &kagentv1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "assistant", UID: "template-uid"}}
+	runtimeHarness := harness("team-a", "byo", nil)
+	runtimeHarness.UID = "harness-uid"
+	runtimeHarness.Spec.BYO = &kagentv1alpha3.BYOHarness{}
+	runtimeHarness.Spec.Workload.Image = "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	runtimeHarness.Spec.Workload.Command = []string{"/agent"}
+	runtimeHarness.Spec.Env = environment
+	runtimeHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
+		WorkerPoolRef: corev1.LocalObjectReference{Name: "gvisor"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+	}
+	harnesses := krt.NewStaticCollection(nil, []*kagentv1alpha3.Harness{runtimeHarness}, opts.WithName("Harnesses")...)
+	mock := krttest.NewMock(t, []any{template})
+	installations := map[string]e2b.E2BInstallation{
+		"embed-lab": {
+			ClientProxy: "http://proxy:1", API: "http://api:1",
+			Workloads: []e2b.E2BWorkload{{
+				Image: runtimeHarness.Spec.Workload.Image, Command: []string{"/agent"},
+				TemplateID: "tpl-by", BuildID: "build-by",
+				Harness: &e2b.E2BHarnessSpec{Command: "nohup h &", ConfigPath: "/c", CredentialPath: "/cr", ActivatePath: "/a", User: "kagent", Cwd: "/data"},
+			}},
+		},
+	}
+	collections := Collections{
+		AgentTemplates:           krttest.GetMockCollection[*kagentv1alpha3.AgentTemplate](mock),
+		Harnesses:                harnesses,
+		ResolvedModelConfigs:     krttest.GetMockCollection[v2translator.ResolvedModelConfig](mock),
+		RemoteMCPServers:         krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
+		ConfigMaps:               krttest.GetMockCollection[*corev1.ConfigMap](mock),
+		Secrets:                  krttest.GetMockCollection[*corev1.Secret](mock),
+		WorkerPools:              krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
+		AgentRuntimeObservations: krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...),
+		ModelConfigStatuses:      krttest.GetMockCollection[krt.ObjectWithStatus[*kagentv1alpha3.ModelConfig, kagentv1alpha3.ModelConfigStatus]](mock),
+	}
+	collections.Agents = krt.NewStaticCollection(nil, []*kagentv1alpha3.Agent{testAgent(template, runtimeHarness)}, opts.WithName("Agents")...)
+	collections.Reconciliations = newAgentReconciliations(collections.Agents, v2translator.Collections{
+		Harnesses: collections.Harnesses, AgentTemplates: collections.AgentTemplates, ResolvedModelConfigs: collections.ResolvedModelConfigs,
+		RemoteMCPServers: collections.RemoteMCPServers, ConfigMaps: collections.ConfigMaps,
+		Secrets: collections.Secrets, WorkerPools: collections.WorkerPools,
+	}, collections.AgentRuntimeObservations, opts, "e2b", installations, "embed-lab")
+	collections.AgentStatuses = newAgentStatuses(collections.Agents, collections.Reconciliations, opts)
+	waitFor(t, func() bool {
+		states := collections.Reconciliations.List()
+		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil && states[0].Target.E2B != nil
 	})
 	return collections, harnesses
 }

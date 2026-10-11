@@ -59,14 +59,19 @@ type AgentDefinition struct {
 }
 
 type RuntimeRevision struct {
-	Revision              string
-	Namespace             string
-	AgentName             string
-	AgentUID              string
-	SourceSnapshot        json.RawMessage
-	AgentCard             *a2apb.AgentCard
-	Credentials           []egress.Credential
-	EgressDestinations    []string
+	Revision           string
+	Namespace          string
+	AgentName          string
+	AgentUID           string
+	SourceSnapshot     json.RawMessage
+	AgentCard          *a2apb.AgentCard
+	Credentials        []egress.Credential
+	EgressDestinations []string
+	// Provider selects the execution backend ('substrate' or 'e2b').
+	Provider string
+	// ActorTemplate* hold the Substrate actor artifact identity. For an E2B
+	// revision they are empty: E2B binds its artifact through
+	// execution_revision_binding, not an ActorTemplate.
 	ActorTemplateAtespace string
 	ActorTemplateName     string
 	ActorTemplateUID      string
@@ -92,9 +97,13 @@ type SessionTaskSnapshot struct {
 // RuntimeArtifact identifies backend resources retained by either runtime kind.
 // Agent configuration and SandboxTemplate provenance stay in their extensions.
 type RuntimeArtifact struct {
-	Revision              string
-	Kind                  string
-	Namespace             string
+	Revision  string
+	Kind      string
+	Namespace string
+	// Provider selects the execution backend ('substrate' or 'e2b').
+	Provider string
+	// ActorTemplate* are empty for E2B artifacts; only Substrate artifacts
+	// carry an ActorTemplate identity.
 	ActorTemplateAtespace string
 	ActorTemplateName     string
 	ActorTemplateUID      string

@@ -274,13 +274,13 @@ func lifecycleForkFixture(t *testing.T, store *lifecycleTestStore, actors *lifec
 	message.ContextID = source.ContextId
 	task := a2a.NewSubmittedTask(message, message)
 	createHash := sha256.Sum256([]byte("fixture-create"))
-	initialVersion, err := store.CreateRuntimeTask(t.Context(), source.Id, createHash[:], task, "")
+	initialVersion, err := store.CreateRuntimeTask(t.Context(), source.Id, createHash[:], task, "", nil)
 	require.NoError(t, err)
 	task.Status.State = a2a.TaskStateCompleted
 	hash := sha256.Sum256([]byte("fixture-complete"))
-	version, err := store.UpdateSessionTask(t.Context(), source.Id, initialVersion, hash[:], task, task, "")
+	version, err := store.UpdateSessionTask(t.Context(), source.Id, initialVersion, hash[:], task, task, "", nil)
 	require.NoError(t, err)
-	require.NoError(t, store.SettleSessionTask(t.Context(), source.Id, string(task.ID), version))
+	require.NoError(t, store.SettleSessionTask(t.Context(), source.Id, string(task.ID), version, nil))
 	boundary, err := store.ClaimSessionQuiescence(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, store.FinishSessionQuiescence(t.Context(), boundary,

@@ -12,15 +12,18 @@ package app
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"time"
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/a2agateway"
 	v2controller "github.com/kagent-dev/kagent/go/core/internal/controller"
@@ -28,6 +31,7 @@ import (
 	remotemcpcontroller "github.com/kagent-dev/kagent/go/core/internal/controller/remotemcpserver"
 	scheduledruncontroller "github.com/kagent-dev/kagent/go/core/internal/controller/scheduledrun"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
+	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	"github.com/kagent-dev/kagent/go/core/internal/grpcserver"
 	authimpl "github.com/kagent-dev/kagent/go/core/internal/httpserver/auth"
 	v2mcp "github.com/kagent-dev/kagent/go/core/internal/mcp"
@@ -190,6 +194,16 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}()
 
+	// Resolve the execution provider and reject incompatible auth/provider
+	// combinations before any side-effects (migrations, manager, Substrate
+	// dial). A signing-key + Substrate deployment would silently break every
+	// guest callback, so it fails fast here.
+	executionProvider := strings.ToLower(kagentenv.ExecutionProvider.Get())
+	e2bOnly := executionProvider == "e2b"
+	if err := validateExecutionProviderConfig(executionProvider, kagentenv.ExecutionSigningKeyFile.Get()); err != nil {
+		return err
+	}
+
 	dbURL, err := database.ResolveURL(env(kagentenv.PostgresDatabaseURL), kagentenv.PostgresDatabaseURLFile.Get())
 	if err != nil {
 		return err
@@ -258,29 +272,68 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("create controller manager: %w", err)
 	}
-	runtime, err := v2controller.NewRuntime(kubeConfig, watchNamespaces, ctx.Done())
+	// Parse the E2B installation map before the collection graph so the
+	// reconciler's E2B preparation can resolve workload->artifact mappings.
+	// The provider is a deployment mode; the selected installation is explicit.
+	// executionProvider and e2bOnly were resolved and validated above.
+	var e2bInstallations map[string]a2agateway.E2BInstallation
+	var e2bInstallation string
+	if raw := kagentenv.E2BInstallations.Get(); raw != "" {
+		e2bInstallations, err = a2agateway.E2BInstallations(raw)
+		if err != nil {
+			return err
+		}
+	}
+	if e2bOnly {
+		e2bInstallation = kagentenv.E2BInstallation.Get()
+		if e2bInstallation == "" {
+			return fmt.Errorf("KAGENT_E2B_INSTALLATION must select the installation KAGENT_EXECUTION_PROVIDER=e2b prepares revisions against")
+		}
+		if _, ok := e2bInstallations[e2bInstallation]; !ok {
+			return fmt.Errorf("KAGENT_E2B_INSTALLATION %q is not a key of KAGENT_E2B_INSTALLATIONS", e2bInstallation)
+		}
+	}
+	runtime, err := v2controller.NewRuntime(kubeConfig, watchNamespaces, ctx.Done(), executionProvider, e2bInstallations, e2bInstallation)
 	if err != nil {
 		return err
 	}
-	actors, err := substrate.Dial(ctx, substrate.Config{
-		AteAPIEndpoint: env(kagentenv.SubstrateATEAPIEndpoint),
-		CAFile:         kagentenv.SubstrateATEAPICAFile.Get(),
-		ClientCertFile: kagentenv.SubstrateATEAPIClientCertFile.Get(),
-		CallTimeout:    30 * time.Second,
-	})
-	if err != nil {
-		return err
+	// In E2B-only mode there is no ate-api to dial: Substrate actor calls are
+	// served by a disabled stub that returns FailedPrecondition, so services
+	// constructed with it fail closed rather than panic on nil. The standalone
+	// Sandbox/guest services and Substrate reconcilers are skipped below.
+	var actors substrate.Actors
+	if e2bOnly {
+		actors = substrate.DisabledActorClient()
+	} else {
+		dialed, err := substrate.Dial(ctx, substrate.Config{
+			AteAPIEndpoint: env(kagentenv.SubstrateATEAPIEndpoint),
+			CAFile:         kagentenv.SubstrateATEAPICAFile.Get(),
+			ClientCertFile: kagentenv.SubstrateATEAPIClientCertFile.Get(),
+			CallTimeout:    30 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defer dialed.Close()
+		actors = dialed
 	}
-	defer actors.Close()
-	reconciler, err := v2controller.NewReconciler(kubeConfig, runtime.Collections, store, actors)
-	if err != nil {
-		return err
-	}
-	if err := manager.Add(reconciler); err != nil {
-		return fmt.Errorf("add reconciler to controller manager: %w", err)
-	}
-	if err := manager.Add(v2controller.NewRuntimeRevisionGC(store, actors)); err != nil {
-		return fmt.Errorf("add runtime revision GC to controller manager: %w", err)
+	// The reconciler runs in both modes: under Substrate it applies
+	// ActorTemplates; under E2B it records the resolved artifact binding.
+	// templates is nil under E2B — the reconciler branches to the E2B path
+	// before ever touching it.
+	{
+		reconciler, err := v2controller.NewReconciler(kubeConfig, runtime.Collections, store, actors, e2bArtifactReadiness(e2bInstallations))
+		if err != nil {
+			return err
+		}
+		if err := manager.Add(reconciler); err != nil {
+			return fmt.Errorf("add reconciler to controller manager: %w", err)
+		}
+		if !e2bOnly {
+			if err := manager.Add(v2controller.NewRuntimeRevisionGC(store, actors)); err != nil {
+				return fmt.Errorf("add runtime revision GC to controller manager: %w", err)
+			}
+		}
 	}
 	if opts.SetupWithManager != nil {
 		if err := opts.SetupWithManager(manager); err != nil {
@@ -304,7 +357,187 @@ func Run(ctx context.Context, opts Options) error {
 	prompts := prompttemplateservice.NewService(manager.GetClient(), authorizer)
 	system := systemservice.NewService(manager.GetClient(), watchNamespaces, authorizer, actors)
 	memory := memoryservice.NewService(store)
-	sessionWorkflow := sessionsvc.NewActorWorkflow(store, actors)
+	// The E2B installation map was parsed before the collection graph above
+	// and is shared by the gateway dialer and the session create path.
+	// The create-path provider lookup resolves one installation to a sandbox
+	// creator (its control-plane API client) plus the egress endpoints the
+	// enforced allowlist and harness base_url need.
+	var workflowOpts []sessionsvc.ActorWorkflowOption
+	// e2bCredRefresh is the shared credential refresher the gateway dispatch
+	// hook also uses; built only when E2B is configured with a signing key.
+	var e2bCredRefresh *sessionsvc.E2BCredentialRefresher
+	// The execution credential signer is shared by the E2B bootstrap probe and
+	// the runtime authenticator; it is only present when a signing key is
+	// configured. It is read once here and reused by both.
+	var executionAuth *taskstore.ExecutionAuthenticator
+	if keyFile := kagentenv.ExecutionSigningKeyFile.Get(); keyFile != "" {
+		// A signing key switches the single runtime-callback endpoint to
+		// signed-only auth; validateExecutionProviderConfig already rejected
+		// the key + non-E2B combination before any startup side-effects.
+		key, err := os.ReadFile(keyFile)
+		if err != nil {
+			return fmt.Errorf("read execution signing key: %w", err)
+		}
+		executionAuth, err = taskstore.NewExecutionAuthenticator(key)
+		if err != nil {
+			return fmt.Errorf("configure execution authenticator: %w", err)
+		}
+	}
+	if len(e2bInstallations) > 0 {
+		// The credential refresher is shared by the workflow resume path, the
+		// background renewer, and the gateway dispatch hook — one refresher
+		// serializes per binding so concurrent triggers cannot regress the
+		// installed credential. It is wired only when a signing key exists so a
+		// sign-less install never pretends to refresh.
+		if executionAuth != nil {
+			e2bCredRefresh = sessionsvc.NewE2BCredentialRefresher(store,
+				func(installation string) (*sessionsvc.E2BProvider, error) {
+					inst, ok := e2bInstallations[installation]
+					if !ok || inst.API == "" {
+						return nil, fmt.Errorf("E2B installation %q is not configured for credential refresh", installation)
+					}
+					client, err := e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+					if err != nil {
+						return nil, err
+					}
+					return &sessionsvc.E2BProvider{
+						Creator:      client,
+						Lister:       client,
+						Bootstrapper: E2BBootstrapperFactory(inst, executionAuth),
+					}, nil
+				})
+		}
+		// The orphan reaper sweeps provider sandboxes no live binding claims;
+		// it shares the installation map so an unconfigured installation is
+		// never listed. Only installations with a control-plane api endpoint
+		// can be swept.
+		var reaperInstallations []string
+		for id, inst := range e2bInstallations {
+			if inst.API != "" {
+				reaperInstallations = append(reaperInstallations, id)
+			}
+		}
+		if len(reaperInstallations) > 0 {
+			orphanLookup := func(installation string) (v2controller.E2BOrphanLister, error) {
+				inst, ok := e2bInstallations[installation]
+				if !ok {
+					return nil, fmt.Errorf("E2B installation %q is not configured", installation)
+				}
+				return e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+			}
+			// The late-binding reconciler runs ahead of the orphan reaper's
+			// delete so a sandbox whose create response was lost is adopted by
+			// its open operation before the reaper could reap it as unbound.
+			if err := manager.Add(v2controller.NewE2BLateBindingReconciler(store, reaperInstallations, orphanLookup)); err != nil {
+				return fmt.Errorf("add E2B late-binding reconciler to controller manager: %w", err)
+			}
+			reaper := v2controller.NewE2BOrphanReaper(store, reaperInstallations,
+				orphanLookup)
+			if err := manager.Add(reaper); err != nil {
+				return fmt.Errorf("add E2B orphan reaper to controller manager: %w", err)
+			}
+			// The timeout renewer keeps a bound sandbox's lifetime ahead of its
+			// running tasks so a mid-turn compute is never killed or paused. It
+			// shares the installation map; a configured-but-lifetime-less
+			// installation yields no renewal (the sandbox ages to its
+			// timeout-to-pause bound).
+			if err := manager.Add(v2controller.NewE2BTimeoutRenewer(store,
+				func(installation string) (v2controller.E2BTimeoutSetter, int32, error) {
+					inst, ok := e2bInstallations[installation]
+					if !ok || inst.API == "" {
+						return nil, 0, fmt.Errorf("E2B installation %q is not configured for timeout renewal", installation)
+					}
+					// Zero uses the provider default at create, but an admitted
+					// task must never renew under the resume floor — resolve it
+					// to the shared resume lifetime rather than skipping renewal.
+					configured := int32(kagentenv.E2BSandboxTimeout.Get() / time.Second)
+					var lifetime int32
+					switch {
+					case configured < 0:
+						return nil, 0, fmt.Errorf("E2B sandbox timeout %ds is invalid: negative lifetime cannot renew an admitted task", configured)
+					case configured == 0:
+						// Omitted: resolve to the resume floor.
+						lifetime = e2b.ResumeLifetimeSeconds
+					case configured < v2controller.MinRenewableLifetimeSeconds:
+						// A positive lifetime shorter than the renewal cadence
+						// lets an admitted task pause between sweeps. Reject it
+						// rather than silently upgrading the operator's intent.
+						return nil, 0, fmt.Errorf("E2B sandbox timeout %ds is unsafe: below the %ds renewal floor, an admitted task could pause mid-turn", configured, v2controller.MinRenewableLifetimeSeconds)
+					default:
+						lifetime = configured
+					}
+					client, err := e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+					if err != nil {
+						return nil, 0, err
+					}
+					return client, lifetime, nil
+				})); err != nil {
+				return fmt.Errorf("add E2B timeout renewer to controller manager: %w", err)
+			}
+			// The loss reaper revokes a live binding whose bound sandbox is
+			// gone, killing the credential minted against that compute so a
+			// stale one stops authorizing callbacks. Only a definitive 404
+			// revokes; any uncertainty leaves the binding live and the dialer
+			// reports runtime loss at use time instead.
+			if err := manager.Add(v2controller.NewE2BLossReaper(store,
+				func(installation string) (v2controller.E2BLossInspector, error) {
+					inst, ok := e2bInstallations[installation]
+					if !ok || inst.API == "" {
+						return nil, fmt.Errorf("E2B installation %q is not configured for loss inspection", installation)
+					}
+					return e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+				})); err != nil {
+				return fmt.Errorf("add E2B loss reaper to controller manager: %w", err)
+			}
+			// The credential renewer keeps each live binding's runtime
+			// credential ahead of expiry for running sandboxes; a paused one is
+			// refreshed when work wakes it, never by the sweep.
+			// Register only when a refresher was actually built: e2bCredRefresh
+			// is a concrete pointer that is nil without a signing key, and a
+			// typed-nil into the interface defeats the renewer's nil guard.
+			if e2bCredRefresh != nil {
+				if err := manager.Add(v2controller.NewE2BCredentialRenewer(store, e2bCredRefresh)); err != nil {
+					return fmt.Errorf("add E2B credential renewer to controller manager: %w", err)
+				}
+			}
+		}
+		if e2bCredRefresh != nil {
+			workflowOpts = append(workflowOpts, sessionsvc.WithE2BCredentialRefresher(e2bCredRefresh))
+		}
+		workflowOpts = append(workflowOpts, sessionsvc.WithE2BProvider(
+			func(installation string) (*sessionsvc.E2BProvider, error) {
+				inst, ok := e2bInstallations[installation]
+				if !ok {
+					return nil, fmt.Errorf("E2B installation %q is not configured", installation)
+				}
+				if inst.API == "" {
+					return nil, fmt.Errorf("E2B installation %q has no control-plane api endpoint", installation)
+				}
+				client, err := e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+				if err != nil {
+					return nil, err
+				}
+				return &sessionsvc.E2BProvider{
+					Creator: client,
+					Config: sessionsvc.E2BCreateConfig{
+						BrokerAddress:         inst.BrokerAddress,
+						CallbackAddress:       inst.CallbackAddress,
+						SandboxTimeoutSeconds: int32(kagentenv.E2BSandboxTimeout.Get() / time.Second),
+					},
+					// The same control-plane client lists sandboxes by
+					// correlation metadata, so a lost create reconciles to the
+					// sandbox it placed instead of leaving an orphan.
+					Lister: client,
+					// The bootstrap probe activates the bound sandbox: only set
+					// when the install declares its machine template's harness
+					// contract AND a signing key is configured — without a
+					// signer there is no credential to write, so activation is
+					// impossible and create stays at the pre-launch milestone.
+					Bootstrapper: E2BBootstrapperFactory(inst, executionAuth),
+				}, nil
+			}))
+	}
+	sessionWorkflow := sessionsvc.NewActorWorkflow(store, actors, workflowOpts...)
 	runtimeTasks := taskstore.NewService(store)
 	if err := manager.Add(sessionWorkflow); err != nil {
 		return fmt.Errorf("register idle session worker: %w", err)
@@ -318,13 +551,47 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	sessions := sessionsvc.NewService(store, authorizer, sessionWorkflow)
 	checkpoints := checkpoint.NewService(store, authorizer, actors, sessionWorkflow)
-	gatewayDialer, err := a2agateway.NewRuntimeDialer(
-		kagentenv.SubstrateAtenetRouterURL.Get(),
-		authenticator,
-	)
-	if err != nil {
-		return err
+	var substrateDialer *a2agateway.RuntimeDialer
+	if !e2bOnly {
+		substrateDialer, err = a2agateway.NewRuntimeDialer(
+			kagentenv.SubstrateAtenetRouterURL.Get(),
+			authenticator,
+		)
+		if err != nil {
+			return err
+		}
 	}
+	// E2B sessions route through the same runtimeDialer boundary as Substrate.
+	// The installation map was parsed above and is optional; an unconfigured
+	// E2B session fails closed rather than falling back to Substrate.
+	var e2bDialer *a2agateway.E2BDialer
+	if len(e2bInstallations) > 0 {
+		// e2bCredRefresh is a concrete pointer that is nil without a signing
+		// key. Passing it to the interface parameter directly would produce a
+		// non-nil interface wrapping a nil refresher, defeating the dialer's
+		// nil check — assign it only inside the guard so a genuine nil
+		// interface is passed when refresh is disabled.
+		var dispatchEnsure a2agateway.E2BCredentialEnsure
+		if e2bCredRefresh != nil {
+			dispatchEnsure = e2bCredRefresh
+		}
+		e2bDialer, err = a2agateway.NewE2BDialer(store, e2bInstallations, authenticator,
+			dispatchEnsure,
+			func(installation string) (a2agateway.E2BSandboxInspector, error) {
+				inst, ok := e2bInstallations[installation]
+				if !ok {
+					return nil, fmt.Errorf("E2B installation %q is not configured", installation)
+				}
+				if inst.API == "" {
+					return nil, fmt.Errorf("E2B installation %q has no api endpoint for liveness", installation)
+				}
+				return e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+			})
+		if err != nil {
+			return err
+		}
+	}
+	gatewayDialer := a2agateway.NewProviderDialer(substrateDialer, e2bDialer)
 	agents := kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.Agent{}, &kagentv1alpha3.AgentList{}, "Agent")
 	interactions := sessionsvc.NewInteractionService(store, agents, sessions)
 	gateway := a2agateway.New(interactions, gatewayDialer, cmp.Or(kagentenv.KagentGatewayURL.Get(), "http://127.0.0.1:8083"))
@@ -337,25 +604,33 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("add scheduled run controller: %w", err)
 	}
 	sandboxTemplates := kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.SandboxTemplate{}, &kagentv1alpha3.SandboxTemplateList{}, kagentv1alpha3.SandboxTemplateKind)
-	guests, err := sandboxservice.NewGuestDialer(kagentenv.SubstrateAtenetRouterURL.Get(), authenticator)
-	if err != nil {
-		return err
-	}
-	defer guests.Close()
-	policy := substrate.SandboxPolicy{
-		GuestImage: env(kagentenv.SandboxGuestImage),
-		CPU:        kagentenv.SandboxCPU.Get(),
-		Memory:     kagentenv.SandboxMemory.Get(),
-	}
-	preparation, err := v2controller.NewSandboxReconciler(kubeConfig, runtime, store, actors, policy)
-	if err != nil {
-		return err
-	}
-	if err := manager.Add(preparation); err != nil {
-		return err
+	var guests *sandboxservice.GuestDialer
+	if !e2bOnly {
+		var gerr error
+		guests, gerr = sandboxservice.NewGuestDialer(kagentenv.SubstrateAtenetRouterURL.Get(), authenticator)
+		if gerr != nil {
+			return gerr
+		}
+		defer guests.Close()
+		policy := substrate.SandboxPolicy{
+			GuestImage: env(kagentenv.SandboxGuestImage),
+			CPU:        kagentenv.SandboxCPU.Get(),
+			Memory:     kagentenv.SandboxMemory.Get(),
+		}
+		preparation, err := v2controller.NewSandboxReconciler(kubeConfig, runtime, store, actors, policy)
+		if err != nil {
+			return err
+		}
+		if err := manager.Add(preparation); err != nil {
+			return err
+		}
 	}
 	sandboxes, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: manager.GetClient(), Authorizer: authorizer, Actors: actors, Guests: guests,
-		DefaultTTL: kagentenv.SandboxDefaultTTL.Get(), MaxTTL: kagentenv.SandboxMaxTTL.Get()})
+		DefaultTTL: kagentenv.SandboxDefaultTTL.Get(), MaxTTL: kagentenv.SandboxMaxTTL.Get(),
+		// E2B-only: standalone sandbox + guest/PTY/file ops return
+		// FailedPrecondition rather than driving a Substrate runtime that does
+		// not exist. Reads still work so the API stays honest.
+		Disabled: e2bOnly})
 	if err != nil {
 		return err
 	}
@@ -371,18 +646,27 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.HandleFunc("/", rootHealthHandler)
 	mux.Handle("/mcp", otelhttp.NewHandler(auth.AuthnMiddleware(authenticator)(mcpHandler), "/mcp"))
 	mux.Handle(a2agateway.HTTPPathPrefix, otelhttp.NewHandler(a2agateway.NewHTTPHandler(gateway, authenticator, store), a2agateway.HTTPPathPrefix))
+	// The private runtime callback's trust model is fixed by configuration.
+	// When an E2B signing key is set the endpoint is signed-only: every runtime
+	// call must carry a valid signed credential and the insecure Substrate
+	// identity header is rejected, never a fallback. Without a key the
+	// endpoint serves the legacy Substrate identity path only.
+	runtimeAuthenticator := taskstore.NewRuntimeAuthenticator()
+	if executionAuth != nil {
+		runtimeAuthenticator = taskstore.NewSignedRuntimeAuthenticator(executionAuth)
+	}
 	server, err := grpcserver.New(grpcserver.Config{
 		MethodPolicies:        policies,
 		RegisterServices:      opts.GRPCServices,
 		BindAddress:           env(kagentenv.HTTPBindAddress),
+		TLSCertFile:           kagentenv.GRPCTLSCertFile.Get(),
+		TLSKeyFile:            kagentenv.GRPCTLSKeyFile.Get(),
 		Reflection:            kagentenv.GRPCReflection.Get(),
 		Authenticator:         authenticator,
-		RuntimeAuthenticator:  &taskstore.Authenticator{},
+		RuntimeAuthenticator:  runtimeAuthenticator,
 		ShareStore:            store,
 		ModelService:          models,
 		ToolService:           tools,
@@ -438,6 +722,19 @@ func env(variable kagentenv.StringVar) string {
 	return variable.DefaultValue()
 }
 
+// rootHealthHandler answers the bare-root health probe. The mux pattern "/"
+// matches every path, so without the explicit path check this handler would
+// return 200 for any unmatched request — including RPC-shaped paths that no
+// service owns. Restrict the success response to the root and let everything
+// else fall through to a 404.
+func rootHealthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // metricsBindAddress resolves KAGENT_METRICS_BIND_ADDRESS. controller-runtime reads an
 // empty address as "unset" and falls back to :8080, so an empty value would
 // serve metrics on a port nobody asked for. "0" disables the metrics server.
@@ -467,4 +764,214 @@ func namespaceCache(names []string) map[string]cache.Config {
 		result[name] = cache.Config{}
 	}
 	return result
+}
+
+// E2BBootstrapperFactory builds the per-sandbox activation probe for one
+// installation. It returns nil — leaving create at the pre-launch milestone —
+// when no execution signing key is configured or the install has no proxy:
+// without a signer there is no credential to write, so activation is
+// impossible rather than merely absent. The launch contract arrives with each
+// bound sandbox from the revision's persisted binding — a frozen value, not
+// live install config — so a later workload-mapping change cannot re-map an
+// existing revision's bootstrap.
+func E2BBootstrapperFactory(inst a2agateway.E2BInstallation, auth *taskstore.ExecutionAuthenticator) sessionsvc.E2BBootstrapperFactory {
+	if auth == nil || inst.ClientProxy == "" {
+		return nil
+	}
+	proxy := strings.TrimSuffix(inst.ClientProxy, "/")
+	return func(sandbox *e2b.Sandbox, launchContract []byte) (sessionsvc.E2BBootstrapper, error) {
+		var h a2agateway.E2BHarnessSpec
+		if err := json.Unmarshal(launchContract, &h); err != nil {
+			return nil, fmt.Errorf("decode persisted launch contract: %w", err)
+		}
+		// The contract files are written as the harness user so they are owned
+		// by it (envd applies the username param as the file owner); ownership
+		// alone is not isolation — the prepare step also creates the contract
+		// directory mode 0700 owned by that user, so no other guest account can
+		// read the credential within.
+		envd, err := e2b.NewEnvdClient(proxy, sandbox.SandboxID, sandbox.EnvdAccessToken, h.User, nil)
+		if err != nil {
+			return nil, err
+		}
+		lifecycle, err := e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+		if err != nil {
+			return nil, err
+		}
+		return e2b.NewBootstrapper(e2b.BootstrapperConfig{
+			Envd:      envd,
+			Lifecycle: lifecycle,
+			Signer:    auth.SignExecutionCredential,
+			Files: e2b.BootstrapFiles{
+				ConfigPath:     h.ConfigPath,
+				CredentialPath: h.CredentialPath,
+				AgentCardPath:  h.AgentCardPath,
+				// The signed TaskStore reads its session identity from the ADK's
+				// fixed runtime-identity path, not an install-config path.
+				IdentityPath: apia2a.RuntimeIdentityPath,
+				CAPath:       h.CAPath,
+				CAPEM:        []byte(inst.CallbackCABundle),
+				ActivatePath: h.ActivatePath,
+			},
+			Prepare: bootstrapPrepare(h.PrepareCommand, h.ConfigPath, h.AgentCardPath, h.CredentialPath, h.CAPath, apia2a.RuntimeIdentityPath, h.ActivatePath),
+			// Command carries the E2B-owned process environment — the
+			// control-plane callback endpoint, the runtime credential and CA
+			// paths, and the config/card file locations — so the launch
+			// contract's wiring always wins over revision-supplied env and the
+			// static command line never has to embed per-revision config.
+			Command: &e2b.BootstrapCommand{
+				Cmd:  h.Command,
+				User: h.User, Cwd: h.Cwd,
+				Envs: e2bContractEnvs(h, inst),
+			},
+			ReadyProbe: e2bReadyProbe(proxy, sandbox.SandboxID),
+		})
+	}
+}
+
+// e2bContractEnvs is the E2B-owned slice of the guest process environment —
+// the wiring the revision environment may never override: the control-plane
+// callback the harness calls back on (KAGENT_API_URL -> the installation's
+// callback address, not the in-cluster DNS name the Substrate compiler bakes
+// in), the credential and CA file locations the contract provisions, and the
+// egress broker the model base_url resolves to. These are trusted installation
+// values; a revision-supplied entry of the same name is dropped at merge so
+// authored config cannot redirect the callback or claim a different credential
+// path.
+func e2bContractEnvs(h a2agateway.E2BHarnessSpec, inst a2agateway.E2BInstallation) map[string]string {
+	envs := map[string]string{}
+	// Contract-declared wiring first — the harness's own overrides (e.g. its
+	// model base-url pointed at the credential broker). These are operator
+	// values that always win over a same-named revision env entry.
+	for k, v := range h.Env {
+		envs[k] = v
+	}
+	// Point the harness's declared model base-url at the installation's
+	// credential broker so model traffic and its credentials stay outside the
+	// guest; an authored revision env of the same name never overrides it.
+	if h.ModelURLEnv != "" && inst.BrokerAddress != "" {
+		envs[h.ModelURLEnv] = inst.BrokerAddress
+	}
+	if inst.CallbackAddress != "" {
+		envs[kagentenv.KagentAPIURL.Name()] = inst.CallbackAddress
+	}
+	if h.CredentialPath != "" {
+		envs["KAGENT_RUNTIME_CREDENTIAL_PATH"] = h.CredentialPath
+	}
+	if h.CAPath != "" {
+		envs["SSL_CERT_FILE"] = h.CAPath
+	}
+	if len(envs) == 0 {
+		return nil
+	}
+	return envs
+}
+
+// e2bArtifactReadiness resolves an installation's control-plane client and
+// reports whether the mapped template's build is present and ready. It returns
+// nil when no E2B installations are configured so the reconciler's readiness
+// check fails closed rather than promoting an unverifiable artifact.
+func e2bArtifactReadiness(installations map[string]a2agateway.E2BInstallation) func(ctx context.Context, installation, templateID, buildID string) (bool, error) {
+	if len(installations) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, installation, templateID, buildID string) (bool, error) {
+		inst, ok := installations[installation]
+		if !ok || inst.API == "" {
+			return false, fmt.Errorf("E2B installation %q has no control-plane api endpoint", installation)
+		}
+		client, err := e2b.New(e2b.Config{APIURL: inst.API, APIKey: inst.APIKey})
+		if err != nil {
+			return false, err
+		}
+		bs, err := client.GetTemplateBuildStatus(ctx, templateID, buildID)
+		if err != nil {
+			if e2b.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		// Verify the returned record is the requested artifact, not a build the
+		// template happened to surface; a mismatched identity is not ready.
+		return bs.TemplateID == templateID && bs.BuildID == buildID && bs.Status == "ready", nil
+	}
+}
+
+// validateExecutionProviderConfig rejects an execution configuration that
+// would silently break the enabled provider's runtime callbacks. It is a
+// pure check — Run calls it before creating the manager or dialing Substrate
+// so an invalid deployment fails at startup, not after side-effects.
+//
+// A signing key switches the single runtime-callback endpoint to signed-only
+// auth, which the insecure Substrate identity header can never satisfy — so a
+// signing key while Substrate is enabled is rejected. E2B-only mode may run
+// with or without a key (keyless only for evaluation; a real E2B deployment
+// needs one for the activation probe, and a create then fails in preparation,
+// which is a separate, already-enforced precondition).
+func validateExecutionProviderConfig(provider, signingKeyFile string) error {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	hasKey := signingKeyFile != ""
+	switch {
+	case p == "e2b":
+		// Supported: signing key + e2b is the real E2B deployment; keyless is
+		// evaluation-only (a create fails in preparation without a credential
+		// to write, an already-enforced precondition).
+	case p == "" || p == "substrate":
+		// Signing key + Substrate breaks its insecure-header callbacks.
+		if hasKey {
+			return fmt.Errorf("KAGENT_EXECUTION_SIGNING_KEY_FILE requires KAGENT_EXECUTION_PROVIDER=e2b: a signing key makes the runtime-callback endpoint signed-only and Substrate guests send the insecure identity header")
+		}
+	default:
+		return fmt.Errorf("unknown KAGENT_EXECUTION_PROVIDER %q: supported providers are \"substrate\" (default) and \"e2b\"", provider)
+	}
+	return nil
+}
+
+// bootstrapPrepare wraps the privileged pre-launch step: the trusted prepare
+// command plus the restrictive contract directory (0700, harness-user owned)
+// the credential lands in. An empty command with no contract paths means no
+// privileged preparation.
+func bootstrapPrepare(cmd string, paths ...string) *e2b.BootstrapPrepare {
+	var dirs []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		d := path.Dir(p)
+		if d != "" && d != "/" && d != "." && !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	if strings.TrimSpace(cmd) == "" && len(dirs) == 0 {
+		return nil
+	}
+	return &e2b.BootstrapPrepare{Cmd: cmd, SecureDirs: dirs}
+}
+
+// e2bReadyProbe polls the sandbox's /readyz through the client proxy — the
+// same ingress the gateway dials — until it serves 200 or the caller's context
+// ends. Port 80 is the fixed harness ingress port.
+func e2bReadyProbe(proxy, sandboxID string) func(ctx context.Context) error {
+	url := proxy + "/readyz"
+	client := &http.Client{Timeout: 5 * time.Second}
+	return func(ctx context.Context) error {
+		for {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("E2b-Sandbox-Id", sandboxID)
+			req.Header.Set("E2b-Sandbox-Port", a2agateway.E2BIngressPort)
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("sandbox %s not ready: %w", sandboxID, ctx.Err())
+			case <-time.After(time.Second):
+			}
+		}
+	}
 }

@@ -96,3 +96,15 @@ def test_grpc_metadata_preserves_user_identity():
     assert context.user.user_name == "alice"
     assert context.state["headers"]["x-kagent-source"] == "parent"
     assert context.state["kagent_source"] == "parent"
+
+
+def test_readyz_route_on_http_app():
+    # The production E2B readiness probe dials /readyz on the HTTP ingress
+    # port; the app must expose it alongside /health.
+    from fastapi.testclient import TestClient
+
+    client = TestClient(make_app("127.0.0.1:0").build(local=True))
+    resp = client.get("/readyz")
+    assert resp.status_code == 200
+    assert resp.text == "OK"
+    assert client.get("/health").status_code == 200

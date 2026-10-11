@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	advisoryLockIDSalt  uint32 = 1486364155
-	coreTrackingTable          = "schema_migrations"
-	vectorTrackingTable        = "vector_schema_migrations"
+	advisoryLockIDSalt     uint32 = 1486364155
+	coreTrackingTable             = "schema_migrations"
+	vectorTrackingTable           = "vector_schema_migrations"
+	executionTrackingTable        = "execution_schema_migrations"
 )
 
 var (
@@ -58,6 +59,19 @@ func BuiltinSources(vectorEnabled bool) []Source {
 		})
 	}
 	return sources
+}
+
+// ExecutionSource returns the fork-owned migration source for execution
+// provider bindings. It uses its own tracking table and advisory lock and is
+// registered after the built-in sources via Options.ExtraMigrations, never
+// inside BuiltinSources, so upstream migration ordering stays unchanged.
+func ExecutionSource() Source {
+	return Source{
+		Name:          "execution",
+		TrackingTable: executionTrackingTable,
+		FS:            FS,
+		Dir:           "execution",
+	}
 }
 
 // RunUp applies all pending migrations in source order.

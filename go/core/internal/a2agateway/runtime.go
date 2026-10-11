@@ -76,6 +76,35 @@ func (d *RuntimeDialer) Dial(ctx context.Context, session *apiv1alpha1.Session) 
 	)
 }
 
+// ProviderDialer dispatches a session to the execution provider its
+// a2a_authority selects. Substrate remains the default; a session carrying an
+// E2B authority is routed to the E2B dialer and never to Substrate.
+type ProviderDialer struct {
+	substrate *RuntimeDialer
+	e2b       *E2BDialer
+}
+
+var _ runtimeDialer = (*ProviderDialer)(nil)
+
+// NewProviderDialer composes the two provider dialers. e2b may be nil when no
+// E2B installation is configured; E2B sessions then fail closed at Dial.
+func NewProviderDialer(substrate *RuntimeDialer, e2b *E2BDialer) *ProviderDialer {
+	return &ProviderDialer{substrate: substrate, e2b: e2b}
+}
+
+func (d *ProviderDialer) Dial(ctx context.Context, session *apiv1alpha1.Session) (*a2aclient.Client, error) {
+	if IsE2BAuthority(session.GetA2AAuthority()) {
+		if d.e2b == nil {
+			return nil, fmt.Errorf("session %s selects E2B but no E2B installation is configured", session.GetId())
+		}
+		return d.e2b.Dial(ctx, session)
+	}
+	if d.substrate == nil {
+		return nil, fmt.Errorf("session %s selects Substrate but no Substrate runtime is configured (E2B-only mode)", session.GetId())
+	}
+	return d.substrate.Dial(ctx, session)
+}
+
 // upstreamAuthInterceptor mirrors the current gateway's per-request auth
 // forwarding. ServiceParams make the resulting headers transport-neutral: the
 // A2A gRPC transport carries them as metadata to the private runtime.

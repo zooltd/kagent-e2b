@@ -123,6 +123,15 @@ func (g *Gateway) subscribeToTask(ctx context.Context, agent types.NamespacedNam
 	if isQuiescent(task.Status.State) {
 		return func(yield func(a2atype.Event, error) bool) { yield(task, nil) }
 	}
+	// The task is still live, so subscribing would open a new runtime
+	// connection (and possibly wake compute). During a maintenance closure that
+	// new connection is refused; the stored snapshot is NOT returned in its
+	// place — a stale task must not masquerade as a live stream. The admission
+	// check takes and releases the barrier lock inside its own transaction
+	// before this dial — the lock never spans the runtime call.
+	if err := g.interactions.AdmitLiveSubscription(ctx); err != nil {
+		return errorEvents(err)
+	}
 	client, err := g.dial(ctx, session)
 	if err != nil {
 		return errorEvents(err)
@@ -295,6 +304,17 @@ func (g *Gateway) dial(ctx context.Context, session *apiv1alpha1.Session) (*a2ac
 	client, err := g.dialer.Dial(ctx, session)
 	if err != nil {
 		logging.FromContext(ctx).ErrorContext(ctx, "connect to runtime", "session_id", session.Id, "error", err)
+		// Runtime-loss is a definitive, typed lifecycle outcome — the bound
+		// compute is gone and must not be retried as if reachable. Surface it
+		// with its own message so a caller sees "runtime compute lost" rather
+		// than a generic connect failure it might retry.
+		if errors.Is(err, ErrRuntimeLost) {
+			// Fixed public message: the wrapped error can carry internal
+			// detail (binding/sandbox identifiers, provider errors) that must
+			// not reach the wire. The sentinel's own text is the only safe
+			// public content; the full error stays in the log line above.
+			return nil, a2atype.NewError(a2atype.ErrInternalError, "session runtime lost: "+ErrRuntimeLost.Error())
+		}
 		return nil, a2atype.NewError(a2atype.ErrInternalError, "failed to connect to Session runtime")
 	}
 	return client, nil

@@ -172,3 +172,22 @@ func TestActorDeleteStopsRunningCompute(t *testing.T) {
 	require.NoError(t, ApplyActorTransition(t.Context(), actors, transition))
 	require.Empty(t, actors.calls, "a missing Actor already satisfies deletion")
 }
+
+func TestDisabledActorClientFailsClosed(t *testing.T) {
+	a := DisabledActorClient()
+	for _, call := range []func() error{
+		func() error { _, e := a.GetActor(context.Background(), "ns", "id"); return e },
+		func() error { _, e := a.CreateActor(context.Background(), "ns", "id", "t", "n"); return e },
+		func() error { _, e := a.ResumeActor(context.Background(), "ns", "id"); return e },
+		func() error { _, e := a.SuspendActor(context.Background(), "ns", "id"); return e },
+		func() error { _, e := a.PauseActor(context.Background(), "ns", "id"); return e },
+		func() error { return a.DeleteActor(context.Background(), "ns", "id") },
+		func() error { _, e := a.CreateTag(context.Background(), "ns", "t", "a"); return e },
+		func() error { _, e := a.ListActorTemplates(context.Background(), "ns"); return e },
+	} {
+		err := call()
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("disabled actor call returned %v, want FailedPrecondition", err)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
@@ -249,4 +250,64 @@ func TestMergePolicies(t *testing.T) {
 			t.Fatalf("mergePolicies(nil) = %v, %v", merged, err)
 		}
 	})
+}
+
+func TestRootHealthHandler(t *testing.T) {
+	// The mux "/" pattern is a catch-all: an RPC-shaped path that no service
+	// owns must not inherit the root health response. Regression for the
+	// DeleteSession connect-RPC request that previously returned an empty 200.
+	tests := []struct {
+		path string
+		want int
+	}{
+		{path: "/", want: http.StatusOK},
+		{path: "/kagent.api.v1alpha1.SessionService/DeleteSession", want: http.StatusNotFound},
+		{path: "/kagent.api.v1alpha1.TaskStoreService/CreateTask", want: http.StatusNotFound},
+		{path: "/nonexistent", want: http.StatusNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			rec := httptest.NewRecorder()
+			rootHealthHandler(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("path %q: got %d, want %d", tc.path, rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+// validateExecutionProviderConfig is the startup gate that rejects auth/
+// provider combinations which would silently break runtime callbacks. The
+// supported matrix is: Substrate (default, no key) and E2B-only (key
+// optional for evaluation, required for a real deployment). The dangerous
+// combinations — a signing key under Substrate, and unknown providers — must
+// fail fast at startup.
+func TestValidateExecutionProviderConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		signing   string
+		wantError bool
+	}{
+		{name: "substrate default, no key", provider: "", signing: "", wantError: false},
+		{name: "substrate explicit, no key", provider: "substrate", signing: "", wantError: false},
+		{name: "e2b, no key (evaluation)", provider: "e2b", signing: "", wantError: false},
+		{name: "e2b with key (real deployment)", provider: "e2b", signing: "/etc/secrets/e2b.key", wantError: false},
+		{name: "e2b mixed-case provider", provider: "E2B", signing: "/k", wantError: false},
+		{name: "signing key under substrate", provider: "substrate", signing: "/k", wantError: true},
+		{name: "signing key under default", provider: "", signing: "/k", wantError: true},
+		{name: "unknown provider", provider: "nomad", signing: "", wantError: true},
+		{name: "unknown provider with key", provider: "nomad", signing: "/k", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateExecutionProviderConfig(tc.provider, tc.signing)
+			if tc.wantError && err == nil {
+				t.Fatalf("provider=%q signing=%q: expected error, got nil", tc.provider, tc.signing)
+			}
+			if !tc.wantError && err != nil {
+				t.Fatalf("provider=%q signing=%q: expected nil, got %v", tc.provider, tc.signing, err)
+			}
+		})
+	}
 }

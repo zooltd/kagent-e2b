@@ -120,3 +120,53 @@ func (r *Revision) Digest() (RevisionID, error) {
 	}
 	return RevisionID(sha256.Sum256(append(raw, card...))), nil
 }
+
+// E2BArtifact is the resolved external build an E2B revision binds to, plus the
+// launch contract selected for it. These values come from the installation's
+// workload mapping at preparation and are frozen into the revision's identity.
+type E2BArtifact struct {
+	Installation   string
+	TemplateID     string
+	BuildID        string
+	LaunchContract json.RawMessage
+}
+
+// E2BDigest returns the immutable identity of an E2B revision: the resolved
+// execution inputs plus provider, installation, artifact and the selected
+// launch contract. Unlike Digest it excludes provenance and every inactive
+// Substrate placement field — changing only an authored-but-inactive Substrate
+// policy leaves the E2B revision identical. The authored spec stays in
+// SourceSnapshot for inspection separately.
+func (r *Revision) E2BDigest(artifact E2BArtifact) (RevisionID, error) {
+	raw, err := json.Marshal(struct {
+		AgentName          string              `json:"agentName"`
+		AgentUID           string              `json:"agentUID"`
+		Namespace          string              `json:"namespace"`
+		Image              string              `json:"image"`
+		Command            []string            `json:"command,omitempty"`
+		Args               []string            `json:"args,omitempty"`
+		Environment        []corev1.EnvVar     `json:"environment"`
+		ConfigJSON         json.RawMessage     `json:"config"`
+		Credentials        []egress.Credential `json:"credentials,omitempty"`
+		EgressDestinations []string            `json:"egressDestinations"`
+		Provider           string              `json:"provider"`
+		Installation       string              `json:"installation"`
+		TemplateID         string              `json:"templateId"`
+		BuildID            string              `json:"buildId"`
+		LaunchContract     json.RawMessage     `json:"launchContract"`
+	}{
+		AgentName: r.AgentName, AgentUID: r.AgentUID, Namespace: r.Namespace,
+		Image: r.Image, Command: r.Command, Args: r.Args, Environment: r.Environment, ConfigJSON: r.ConfigJSON,
+		Credentials: r.Credentials, EgressDestinations: r.EgressDestinations,
+		Provider: "e2b", Installation: artifact.Installation, TemplateID: artifact.TemplateID,
+		BuildID: artifact.BuildID, LaunchContract: artifact.LaunchContract,
+	})
+	if err != nil {
+		return RevisionID{}, fmt.Errorf("marshal E2B revision inputs: %w", err)
+	}
+	card, err := proto.MarshalOptions{Deterministic: true}.Marshal(r.AgentCard)
+	if err != nil {
+		return RevisionID{}, fmt.Errorf("marshal runtime revision Agent Card: %w", err)
+	}
+	return RevisionID(sha256.Sum256(append(raw, card...))), nil
+}

@@ -40,6 +40,20 @@ func statusForAgent(state AgentReconciliation, generation int64, latestSuccessfu
 	}
 	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionResolvedRefs, metav1.ConditionTrue, "Resolved", "All runtime references resolved")
 	setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionCompatible, metav1.ConditionTrue, "Compatible", "Resolved configuration is compatible with the Harness")
+
+	// E2B revisions carry no Substrate ActorTemplate; readiness is the
+	// artifact-readiness observation the reconcile published, not a golden
+	// snapshot tag.
+	if state.Target != nil && state.Target.E2B != nil {
+		if state.E2BObserved == nil || !*state.E2BObserved {
+			setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionFalse, "E2BArtifactPending", "waiting for the E2B runtime artifact to verify ready")
+			return status
+		}
+		status.LatestSuccessfulRevision = state.Target.RevisionID.String()
+		setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionTrue, "Ready", "E2B runtime artifact is ready")
+		return status
+	}
+
 	if state.ObservedActorTemplate.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag() == nil {
 		setAgentCondition(&status, generation, kagentv1alpha3.AgentConditionReady, metav1.ConditionFalse, "ActorTemplatePending", "waiting for the ActorTemplate golden snapshot")
 		return status

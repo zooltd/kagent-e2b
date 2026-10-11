@@ -22,6 +22,7 @@ type interactionService interface {
 	PrepareSend(context.Context, types.NamespacedName, *a2a.SendMessageRequest) (*sessionsvc.PreparedSend, error)
 	PrepareCancelTask(context.Context, types.NamespacedName, *a2a.CancelTaskRequest) (*apiv1alpha1.Session, *a2a.Task, error)
 	PrepareTaskSubscription(context.Context, types.NamespacedName, *a2a.SubscribeToTaskRequest) (*apiv1alpha1.Session, *a2a.Task, error)
+	AdmitLiveSubscription(context.Context) error
 	RevokeSend(context.Context, types.NamespacedName, *a2a.Message, uuid.UUID) (bool, error)
 	GetTaskByMessage(context.Context, types.NamespacedName, *a2a.Message) (*a2a.Task, error)
 	GetSendResult(context.Context, types.NamespacedName, *a2a.Message, a2a.TaskID, *int) (*a2a.Task, error)

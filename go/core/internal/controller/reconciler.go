@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,6 +15,7 @@ import (
 	kagentclient "github.com/kagent-dev/kagent/go/api/clientset/versioned/typed/api/v1alpha3"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
+	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	byotranslator "github.com/kagent-dev/kagent/go/core/internal/translator/byo"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/krt"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +45,9 @@ type AgentReconciliation struct {
 	CompilationFailure    *ReconciliationFailure
 	ObservedActorTemplate *ateapipb.ActorTemplate
 	PreparationFailure    *ReconciliationFailure
+	// E2BObserved carries the E2B artifact-readiness observation once the
+	// reconcile publishes it; nil until then so status stays pending.
+	E2BObserved *bool
 }
 
 // compiledTarget is published only after compilation, hashing, and ActorTemplate
@@ -50,6 +56,9 @@ type compiledTarget struct {
 	Revision      v2translator.Revision
 	RevisionID    v2translator.RevisionID
 	ActorTemplate *ateapipb.ActorTemplate
+	// E2B carries the resolved artifact binding and launch contract when the
+	// provider is E2B; ActorTemplate is nil in that mode.
+	E2B *resolvedE2BArtifact
 }
 
 func (c *compiledTarget) equals(other *compiledTarget) bool {
@@ -58,6 +67,16 @@ func (c *compiledTarget) equals(other *compiledTarget) bool {
 	}
 	return c.RevisionID == other.RevisionID && c.Revision.Equals(other.Revision) &&
 		proto.Equal(c.ActorTemplate, other.ActorTemplate)
+}
+
+// resolvedE2BArtifact is the workload-mapping outcome a compiled E2B revision
+// binds to: the installation, the external template and build, and the frozen
+// launch contract the bootstrapper replays.
+type resolvedE2BArtifact struct {
+	Installation   string
+	TemplateID     string
+	BuildID        string
+	LaunchContract []byte
 }
 
 func (r AgentReconciliation) ResourceName() string { return r.Agent.Namespace + "/" + r.Agent.Name }
@@ -95,6 +114,9 @@ func newAgentReconciliations(
 	collections v2translator.Collections,
 	agentRuntimeObservations krt.Collection[AgentRuntimeObservation],
 	opts krt.OptionsBuilder,
+	provider string,
+	e2bInstallations map[string]e2b.E2BInstallation,
+	e2bInstallation string,
 ) krt.Collection[AgentReconciliation] {
 	return krt.NewCollection(agents, func(ctx krt.HandlerContext, agent *kagentv1alpha3.Agent) *AgentReconciliation {
 		state := &AgentReconciliation{Agent: agent}
@@ -103,7 +125,7 @@ func newAgentReconciliations(
 			v2translator.HarnessTypeCodex:  codextranslator.NewCompiler(ctx, collections),
 			v2translator.HarnessTypeClaude: claudetranslator.NewCompiler(ctx, collections),
 			v2translator.HarnessTypeBYO:    byotranslator.NewCompiler(ctx, collections),
-		}).CompileAgent(context.Background(), agent)
+		}, provider).CompileAgent(context.Background(), agent)
 		if err != nil {
 			condition, reason := kagentv1alpha3.AgentConditionResolvedRefs, "ReferenceResolutionFailed"
 			var validation *v2translator.ValidationError
@@ -119,6 +141,55 @@ func newAgentReconciliations(
 		}
 		revision := &compilation.Revision
 		state.Warnings = append([]string(nil), compilation.Warnings...)
+
+		if provider == "e2b" {
+			// E2B resolves the compiled workload to a prepared artifact through
+			// the selected installation's workload mapping, then digests the
+			// execution identity. Missing or ambiguous mappings fail here; no
+			// ActorTemplate is ever constructed.
+			inst, ok := e2bInstallations[e2bInstallation]
+			if !ok || e2bInstallation == "" {
+				state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "E2BInstallationMissing", Message: fmt.Sprintf("E2B installation %q is not configured", e2bInstallation)}
+				return state
+			}
+			workload, err := inst.ResolveWorkload(revision.Image, revision.Command, revision.Args)
+			if err != nil {
+				state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "E2BArtifactUnmapped", Message: err.Error()}
+				return state
+			}
+			contract, err := json.Marshal(workload.Harness)
+			if err != nil {
+				state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "E2BArtifactInvalid", Message: err.Error()}
+				return state
+			}
+			revisionID, err := revision.E2BDigest(v2translator.E2BArtifact{
+				Installation: e2bInstallation, TemplateID: workload.TemplateID, BuildID: workload.BuildID,
+				LaunchContract: contract,
+			})
+			if err != nil {
+				state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "RevisionInvalid", Message: err.Error()}
+				return state
+			}
+			state.Target = &compiledTarget{Revision: *revision, RevisionID: revisionID, E2B: &resolvedE2BArtifact{
+				Installation: e2bInstallation, TemplateID: workload.TemplateID, BuildID: workload.BuildID,
+				LaunchContract: contract,
+			}}
+
+			// Consume the artifact-readiness observation the reconcile published.
+			// Until one lands for this revision the E2B preparation is pending;
+			// a failure becomes the Agent's Ready=False reason.
+			observed := krt.FetchOne(ctx, agentRuntimeObservations, krt.FilterKey(state.ResourceName()))
+			if observed != nil && observed.RevisionID == state.Target.RevisionID {
+				if observed.Failure != nil {
+					state.PreparationFailure = observed.Failure
+				} else {
+					ready := observed.E2BReady
+					state.E2BObserved = &ready
+				}
+			}
+			return state
+		}
+
 		revisionID, err := revision.Digest()
 		if err != nil {
 			state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "RevisionInvalid", Message: err.Error()}
@@ -160,6 +231,7 @@ func newAgentReconciliations(
 type runtimeRevisionStore interface {
 	UpsertAgentDefinition(context.Context, database.AgentDefinition) error
 	RecordRuntimeRevision(context.Context, database.RuntimeRevision, bool) error
+	RecordE2BRuntimeRevision(context.Context, database.E2BRuntimeRevisionInput, bool) error
 	RetireAgentIdentities(ctx context.Context, namespace, name string, except *database.AgentDefinition) error
 }
 
@@ -177,6 +249,12 @@ type Reconciler struct {
 	store       runtimeRevisionStore
 	status      kagentclient.ApiV1alpha3Interface
 
+	// e2bArtifactReady resolves an E2B installation's control-plane client and
+	// reports whether the mapped template/build is present and ready. nil means
+	// no artifact verification is possible; an unverifiable artifact is never
+	// promoted ready.
+	e2bArtifactReady func(ctx context.Context, installation, templateID, buildID string) (bool, error)
+
 	agents                   controllers.Queue
 	agentStatuses            controllers.Queue
 	modelConfigStatuses      controllers.Queue
@@ -187,12 +265,12 @@ type Reconciler struct {
 
 // NewReconciler creates the Kubernetes and database write boundary. Run starts
 // its queues after the registered KRT handlers have received initial state.
-func NewReconciler(config *rest.Config, collections Collections, store runtimeRevisionStore, templates actorTemplateClient) (*Reconciler, error) {
+func NewReconciler(config *rest.Config, collections Collections, store runtimeRevisionStore, templates actorTemplateClient, e2bArtifactReady func(ctx context.Context, installation, templateID, buildID string) (bool, error)) (*Reconciler, error) {
 	statusClient, err := kagentclient.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("create kagent status client: %w", err)
 	}
-	return newReconciler(collections, templates, store, statusClient), nil
+	return newReconciler(collections, templates, store, statusClient, e2bArtifactReady), nil
 }
 
 func newReconciler(
@@ -200,12 +278,14 @@ func newReconciler(
 	templates actorTemplateClient,
 	store runtimeRevisionStore,
 	status kagentclient.ApiV1alpha3Interface,
+	e2bArtifactReady func(ctx context.Context, installation, templateID, buildID string) (bool, error),
 ) *Reconciler {
 	r := &Reconciler{
-		collections: collections,
-		templates:   templates,
-		store:       store,
-		status:      status,
+		collections:      collections,
+		templates:        templates,
+		store:            store,
+		status:           status,
+		e2bArtifactReady: e2bArtifactReady,
 	}
 	r.agents = newReconciliationQueue("v2-agents", func(item any) error {
 		return r.reconcileAgent(context.Background(), item.(string))
@@ -328,6 +408,68 @@ func (r *Reconciler) reconcileAgent(ctx context.Context, key string) error {
 		return nil
 	}
 	target := state.Target
+	if target.E2B != nil {
+		// E2B revisions record their resolved artifact binding directly; there
+		// is no Substrate ActorTemplate to reconcile. The revision is promoted
+		// only when the mapped external artifact verifies ready; an absent,
+		// not-ready or unverifiable artifact stays unpromoted and reports a
+		// preparation observation the status path reads.
+		ready := false
+		var prepFailure *ReconciliationFailure
+		if r.e2bArtifactReady == nil {
+			prepFailure = &ReconciliationFailure{
+				Condition: kagentv1alpha3.AgentConditionReady, Reason: "E2BArtifactUnchecked",
+				Message:   "no E2B artifact readiness check is configured; the revision cannot be promoted",
+				Retryable: true,
+			}
+		} else {
+			ok, err := r.e2bArtifactReady(ctx, target.E2B.Installation, target.E2B.TemplateID, target.E2B.BuildID)
+			switch {
+			case err != nil:
+				prepFailure = &ReconciliationFailure{
+					Condition: kagentv1alpha3.AgentConditionReady, Reason: "E2BArtifactUnchecked",
+					Message:   fmt.Sprintf("could not verify E2B artifact %s/%s in %s: %s", target.E2B.TemplateID, target.E2B.BuildID, target.E2B.Installation, status.Code(err)),
+					Retryable: true,
+				}
+			case !ok:
+				prepFailure = &ReconciliationFailure{
+					Condition: kagentv1alpha3.AgentConditionReady, Reason: "E2BArtifactNotReady",
+					Message:   fmt.Sprintf("E2B artifact %s build %s in installation %s is not ready", target.E2B.TemplateID, target.E2B.BuildID, target.E2B.Installation),
+					Retryable: true,
+				}
+			default:
+				ready = true
+			}
+		}
+		err := r.store.RecordE2BRuntimeRevision(ctx, database.E2BRuntimeRevisionInput{
+			Revision: target.RevisionID.String(), Namespace: definition.Namespace,
+			AgentName: definition.AgentName, AgentUID: definition.AgentUID,
+			SourceSnapshot: target.Revision.Provenance, AgentCard: target.Revision.AgentCard,
+			EgressDestinations: target.Revision.EgressDestinations,
+			ConfigJSON:         target.Revision.ConfigJSON,
+			Environment:        e2bRevisionEnvironment(target.Revision.Environment),
+			Installation:       target.E2B.Installation, ExternalID: target.E2B.TemplateID, BuildID: target.E2B.BuildID,
+			LaunchContract: target.E2B.LaunchContract,
+		}, ready)
+		if err != nil {
+			return r.observePreparationError(*state, fmt.Errorf("store E2B runtime revision %s: %w", target.RevisionID, err))
+		}
+		// Publish the E2B preparation outcome through the same observation
+		// channel Substrate uses so status derives Ready from it. Template is
+		// nil; E2BReady carries the signal.
+		r.collections.AgentRuntimeObservations.ConditionalUpdateObject(AgentRuntimeObservation{
+			Namespace: state.Agent.Namespace, AgentName: state.Agent.Name,
+			RevisionID: target.RevisionID, E2BReady: ready, Failure: prepFailure,
+		})
+		if !ready {
+			// Return a retryable error so the queue backs off and re-checks —
+			// the observation alone does not re-enqueue, and only the Substrate
+			// path polls pending work. An artifact that later becomes ready is
+			// picked up on the retry.
+			return fmt.Errorf("E2B artifact %s/%s in %s not ready", target.E2B.TemplateID, target.E2B.BuildID, target.E2B.Installation)
+		}
+		return nil
+	}
 	desiredRef := target.ActorTemplate.GetMetadata()
 	observed, err := r.templates.GetActorTemplate(ctx, desiredRef.GetAtespace(), desiredRef.GetName())
 	if status.Code(err) == codes.NotFound {
@@ -383,8 +525,37 @@ func (r *Reconciler) observePreparationError(state AgentReconciliation, err erro
 	if state.PreparationFailure != nil && !state.PreparationFailure.Retryable {
 		return err
 	}
-	r.observePreparation(state, nil, runtimePreparationFailure(err, state.Target.ActorTemplate.GetSandboxConfig().GetConfigName(), state.Target.Revision.SandboxClass))
+	// E2B targets have no ActorTemplate; the failure path must not deref it.
+	var configName string
+	if state.Target.ActorTemplate != nil {
+		configName = state.Target.ActorTemplate.GetSandboxConfig().GetConfigName()
+	}
+	r.observePreparation(state, nil, runtimePreparationFailure(err, configName, state.Target.Revision.SandboxClass))
 	return err
+}
+
+// e2bRevisionEnvironment flattens the revision's resolved environment to a
+// literal name->value map for the artifact binding. Secret-bearing entries
+// (ValueFrom) are dropped — credentials are injected by the broker outside
+// the guest and must never be persisted on the binding.
+func e2bRevisionEnvironment(env []corev1.EnvVar) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for _, v := range env {
+		if v.Name == "" || v.ValueFrom != nil {
+			continue
+		}
+		if _, dup := out[v.Name]; dup {
+			continue
+		}
+		out[v.Name] = v.Value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func runtimePreparationFailure(err error, configName string, class atev1alpha1.SandboxClass) *ReconciliationFailure {

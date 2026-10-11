@@ -28,6 +28,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/pkg/app"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
+	"github.com/kagent-dev/kagent/go/core/pkg/migrations"
 )
 
 func main() {
@@ -44,7 +45,12 @@ func main() {
 		logger.ErrorContext(ctx, "invalid controller authentication configuration", "error", err)
 		os.Exit(1)
 	}
-	if err := app.Run(ctx, app.Options{Authenticator: authenticator}); err != nil {
+	if err := app.Run(ctx, app.Options{
+		Authenticator: authenticator,
+		// Fork-owned execution-provider bindings, applied after the built-in
+		// sources via their own tracking table and advisory lock.
+		ExtraMigrations: []migrations.Source{migrations.ExecutionSource()},
+	}); err != nil {
 		logger.ErrorContext(ctx, "controller stopped", "error", err)
 		os.Exit(1)
 	}

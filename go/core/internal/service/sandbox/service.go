@@ -29,6 +29,10 @@ type Config struct {
 	Guests     *GuestDialer
 	DefaultTTL time.Duration
 	MaxTTL     time.Duration
+	// Disabled marks an E2B-only deployment: standalone Sandbox and guest
+	// operations return FailedPrecondition rather than driving a Substrate
+	// runtime that does not exist. Reads still work so the API stays honest.
+	Disabled bool
 }
 
 type Service struct {
@@ -58,6 +62,9 @@ func (s *Service) principal(ctx context.Context, verb auth.Verb, resource auth.R
 }
 
 func (s *Service) Create(ctx context.Context, request *apiv1alpha1.CreateSandboxRequest) (*apiv1alpha1.Sandbox, error) {
+	if s.config.Disabled {
+		return nil, serviceerrors.NewFailedPrecondition("standalone sandboxes are not supported by the configured runtime provider", database.ErrFailedPrecondition)
+	}
 	principal, err := s.principal(ctx, auth.VerbCreate, auth.Resource{Type: "Sandbox"})
 	if err != nil {
 		return nil, err

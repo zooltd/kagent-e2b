@@ -37,9 +37,9 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 			task := a2a.NewSubmittedTask(message, message)
 			task.Status.State = a2a.TaskStateCompleted
 			hash := sha256.Sum256([]byte("completed"))
-			version, err := store.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "")
+			version, err := store.CreateRuntimeTask(t.Context(), session.Id, hash[:], task, "", nil)
 			require.NoError(t, err)
-			require.NoError(t, store.SettleSessionTask(t.Context(), session.Id, string(task.ID), version))
+			require.NoError(t, store.SettleSessionTask(t.Context(), session.Id, string(task.ID), version, nil))
 
 			entered, release := make(chan struct{}), make(chan struct{})
 			actors := &retryTestActors{lifecycleTestActors: base, beforeRead: func(ctx context.Context) {
@@ -68,7 +68,7 @@ func TestIdleLifecycleDoesNotOwnTaskPublication(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, a2a.TaskStateCompleted, visible.Status.State)
 			next := a2a.NewSubmittedTask(message, message)
-			_, err = store.CreateRuntimeTask(t.Context(), session.Id, hash[:], next, "")
+			_, err = store.CreateRuntimeTask(t.Context(), session.Id, hash[:], next, "", nil)
 			require.ErrorIs(t, err, database.ErrFailedPrecondition)
 			checkpoint := &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: string(task.ID)}
 			_, _, err = store.ReserveSessionCheckpoint(t.Context(), checkpoint, "alice", "checkpoint")

@@ -154,8 +154,13 @@ type HarnessSpec struct {
 	// +listMapKey=name
 	Env []RuntimeEnvVar `json:"env,omitempty"`
 
-	// +required
-	Substrate RuntimeSubstratePolicy `json:"substrate"`
+	// Substrate holds the Substrate placement policy. It is optional: under the
+	// Substrate provider compilation requires it and reports a validation
+	// error when absent; under E2B it is inactive and excluded from execution
+	// identity, so an E2B-only Harness leaves it unset rather than inventing a
+	// WorkerPool.
+	// +optional
+	Substrate *RuntimeSubstratePolicy `json:"substrate,omitempty"`
 }
 
 // HarnessCapabilities records behavior proven for a pinned adapter and runtime.

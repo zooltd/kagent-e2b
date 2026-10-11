@@ -34,6 +34,8 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 		return nil, err
 	}
 	template, harness := input.Root.Template, input.Harness
+	// Substrate placement is empty under the E2B provider (substrate policy absent/inactive).
+	workerPool, snapshotLocation := harness.SubstratePlacement()
 	configJSON, err := json.Marshal(compiled.Config)
 	if err != nil {
 		return nil, fmt.Errorf("marshal agent config: %w", err)
@@ -75,7 +77,7 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 		Namespace: template.Namespace,
 		Image:     harness.Spec.Workload.Image, Command: slices.Clone(harness.Spec.Workload.Command), Args: slices.Clone(harness.Spec.Workload.Args),
 		Environment: environment, ConfigJSON: configJSON, AgentCard: card,
-		WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
+		WorkerPoolName: workerPool, SnapshotLocation: snapshotLocation,
 		Credentials: credentials, Provenance: provenance, EgressDestinations: compiled.Egress,
 	}}, nil
 }

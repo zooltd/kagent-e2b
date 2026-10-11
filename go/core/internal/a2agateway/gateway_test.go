@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"net"
 	"strings"
@@ -66,6 +67,22 @@ type gatewayTestStore struct {
 	unscoped         bool
 	settledRead      func() error
 	created          map[string]*apiv1alpha1.Session
+	admissionsClosed bool
+	admissionsErr    error
+}
+
+// CheckAdmissionsOpen lets a test drive the maintenance barrier without a real
+// database; the embedded *database.Client would otherwise panic on a nil pool.
+// It returns ErrAdmissionClosed when the test has closed admissions, matching
+// the real transactional check's contract.
+func (s *gatewayTestStore) CheckAdmissionsOpen(context.Context) error {
+	if s.admissionsErr != nil {
+		return s.admissionsErr
+	}
+	if s.admissionsClosed {
+		return database.ErrAdmissionClosed
+	}
+	return nil
 }
 
 func (s *gatewayTestStore) ReserveSessionDispatch(_ context.Context, _ string, _ uuid.UUID, initialID string) error {
@@ -186,10 +203,13 @@ type gatewayTestRuntime struct {
 	streamState    a2atype.TaskState
 	subscribeErr   error
 	subscribeCalls int
-	cancelErr      error
-	sendCalls      int
-	sentTaskID     a2atype.TaskID
-	onSend         func() error
+	// subscribeSeq, when set, drives the stream body so a test can interleave
+	// control (e.g. closing admissions) between emitted events.
+	subscribeSeq func(yield func(a2atype.Event, error) bool)
+	cancelErr    error
+	sendCalls    int
+	sentTaskID   a2atype.TaskID
+	onSend       func() error
 }
 
 func (r *gatewayTestRuntime) CancelTask(context.Context, a2aclient.ServiceParams, *a2atype.CancelTaskRequest) (*a2atype.Task, error) {
@@ -210,6 +230,9 @@ func (r *gatewayTestRuntime) GetTask(context.Context, a2aclient.ServiceParams, *
 
 func (r *gatewayTestRuntime) SubscribeToTask(context.Context, a2aclient.ServiceParams, *a2atype.SubscribeToTaskRequest) iter.Seq2[a2atype.Event, error] {
 	r.subscribeCalls++
+	if r.subscribeSeq != nil {
+		return r.subscribeSeq
+	}
 	return func(yield func(a2atype.Event, error) bool) {
 		if r.subscribeEvent != nil || r.subscribeErr != nil {
 			yield(r.subscribeEvent, r.subscribeErr)
@@ -383,6 +406,11 @@ func TestGatewayHidesInternalErrors(t *testing.T) {
 	}{
 		{name: "store", store: &gatewayTestStore{err: errors.New("password=secret")}, dialer: &gatewayTestDialer{}, message: a2atype.ErrInternalError.Error()},
 		{name: "dialer", store: &gatewayTestStore{session: session}, dialer: &gatewayTestDialer{err: errors.New("internal.host:1234")}, message: "failed to connect to Session runtime"},
+		// Runtime loss is a typed lifecycle outcome, not a generic connect
+		// failure: it must surface the public ErrRuntimeLost message so the
+		// caller does not retry a dead sandbox, while still hiding the wrapped
+		// internal detail (binding/sandbox identifiers) that the dialer logged.
+		{name: "runtime lost", store: &gatewayTestStore{session: session}, dialer: &gatewayTestDialer{err: fmt.Errorf("session x bound sandbox secret-sandbox-id is gone: %w", ErrRuntimeLost)}, message: "session runtime lost: " + ErrRuntimeLost.Error()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			gateway := newTestGateway(test.store, &gatewayTestAuthorizer{}, test.dialer, gatewayTestURL)
@@ -390,7 +418,7 @@ func TestGatewayHidesInternalErrors(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.message) {
 				t.Fatalf("SendMessage() error = %v, want %q", err, test.message)
 			}
-			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "internal.host") {
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "internal.host") || strings.Contains(err.Error(), "secret-sandbox-id") {
 				t.Fatalf("SendMessage() leaked internal error: %v", err)
 			}
 		})
@@ -874,6 +902,220 @@ func (s *gatewayTestStore) GetSessionTaskByMessage(context.Context, string, stri
 		return s.replay, nil
 	}
 	return nil, database.ErrNotFound
+}
+
+/*
+ * A maintenance closure refuses only the subscription that would open a new
+ * runtime connection. Reads and quiescent-task subscriptions keep serving the
+ * stored snapshot; a cancel that must reach the runtime to settle accepted work
+ * still does. The barrier is a durable admission read, never a dial-time gate.
+ */
+
+// TestSubscribeRefusedWhileAdmissionsClosed proves a live (non-quiescent) task's
+// subscription is refused with the maintenance signal and never dials.
+func TestSubscribeRefusedWhileAdmissionsClosed(t *testing.T) {
+	session := gatewayTestSession()
+	live := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}
+	runtime := &gatewayTestRuntime{}
+	dialer := &gatewayTestDialer{client: gatewayTestClient(t, runtime)}
+	store := &gatewayTestStore{session: session, task: live, admissionsClosed: true}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	var sawErr error
+	for _, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: live.ID}) {
+		sawErr = err
+	}
+	if sawErr == nil || a2atype.ErrorReason(sawErr) != a2atype.ErrorReason(a2atype.ErrUnsupportedOperation) {
+		t.Fatalf("closed-admission subscribe error = %v, want UnsupportedOperation maintenance signal", sawErr)
+	}
+	if dialer.session != nil || runtime.subscribeCalls != 0 {
+		t.Fatal("closed admission dialed the runtime or opened a stream")
+	}
+}
+
+// TestQuiescentSubscribeReadsStoreWhileClosed proves a quiescent task serves its
+// stored snapshot during closure with no barrier dependence and no dial.
+func TestQuiescentSubscribeReadsStoreWhileClosed(t *testing.T) {
+	session := gatewayTestSession()
+	done := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateCompleted}}
+	dialer := &gatewayTestDialer{}
+	store := &gatewayTestStore{session: session, task: done, admissionsClosed: true}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	var got a2atype.Event
+	for event, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: done.ID}) {
+		if err != nil {
+			t.Fatalf("quiescent subscribe during closure = %v", err)
+		}
+		got = event
+	}
+	if got != done {
+		t.Fatalf("quiescent subscribe returned %#v, want the stored snapshot", got)
+	}
+	if dialer.session != nil {
+		t.Fatal("a stored snapshot subscription dialed the runtime")
+	}
+}
+
+// TestCancelStillSettlesWhileAdmissionsClosed proves closure does not block the
+// authorized cancel control path: it may dial to settle accepted work.
+func TestCancelStillSettlesWhileAdmissionsClosed(t *testing.T) {
+	session := gatewayTestSession()
+	working := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}
+	canceled := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateCanceled}}
+	runtime := &gatewayTestRuntime{task: canceled}
+	dialer := &gatewayTestDialer{client: gatewayTestClient(t, runtime)}
+	// The runtime reports canceled; the durable store settles to the same state
+	// before the gateway re-reads it as the cancel result.
+	store := &gatewayTestStore{session: session, task: working, admissionsClosed: true, settledRead: func() error {
+		working.Status.State = a2atype.TaskStateCanceled
+		return nil
+	}}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	result, err := gateway.CancelTask(gatewayTestContext(), &a2atype.CancelTaskRequest{ID: working.ID})
+	if err != nil || result == nil || result.Status.State != a2atype.TaskStateCanceled {
+		t.Fatalf("cancel during closure = %v, %v; the settle path must stay open", result, err)
+	}
+	if dialer.session == nil {
+		t.Fatal("cancel needed the runtime to settle but never dialed")
+	}
+}
+
+// TestEstablishedStreamSurvivesClosure proves closing admissions does not cut a
+// stream that was already admitted: the gateway keeps pulling runtime events.
+func TestEstablishedStreamSurvivesClosure(t *testing.T) {
+	session := gatewayTestSession()
+	live := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}
+	// working -> (barrier closes) -> completed. The stream was admitted while
+	// open, so it must deliver the terminal event without a fresh admission
+	// check or a second dial even though admissions are now closed.
+	firstEventSeen := make(chan struct{})
+	resume := make(chan struct{})
+	runtime := &gatewayTestRuntime{subscribeSeq: func(yield func(a2atype.Event, error) bool) {
+		// First event is non-terminal: establishes the live stream.
+		if !yield(&a2atype.Task{ID: "task", ContextID: session.ContextId,
+			Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}, nil) {
+			return
+		}
+		<-resume // released only after the test has set admissionsClosed = true
+		yield(&a2atype.Task{ID: "task", ContextID: session.ContextId,
+			Status: a2atype.TaskStatus{State: a2atype.TaskStateCompleted}}, nil)
+	}}
+	dialer := &gatewayTestDialer{client: gatewayTestClient(t, runtime)}
+	store := &gatewayTestStore{session: session, task: live, settledRead: func() error {
+		live.Status.State = a2atype.TaskStateCompleted // terminal for the re-read
+		return nil
+	}}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	// Consume the iterator on a goroutine so the test can close admissions
+	// between the first (working) and second (terminal) runtime events. The
+	// consumer signals firstEventSeen (which the main test waits on) but must
+	// NOT release the stream's resume gate — that stays closed until the main
+	// test has flipped the barrier, so the terminal event cannot race ahead.
+	type result struct {
+		event a2atype.Event
+		err   error
+	}
+	var events []result
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		for event, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: live.ID}) {
+			events = append(events, result{event, err})
+			if len(events) == 1 {
+				close(firstEventSeen)
+			}
+		}
+	}()
+	// Wait for the first event to be observed, then close admissions while the
+	// stream is still open, then let it emit its terminal event.
+	select {
+	case <-firstEventSeen:
+	case <-time.After(5 * time.Second):
+		close(resume) // unblock the stream so cleanup can finish
+		t.Fatal("stream did not emit its first event")
+	}
+	store.admissionsClosed = true
+	close(resume)
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not finish after the barrier closed")
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("established stream delivered %d events across closure, want 2", len(events))
+	}
+	for i, ev := range events {
+		if ev.err != nil {
+			t.Fatalf("event %d errored after closure: %v", i, ev.err)
+		}
+	}
+	if runtime.subscribeCalls != 1 {
+		t.Fatalf("subscribe re-dialed/re-admitted after closure: calls = %d", runtime.subscribeCalls)
+	}
+}
+
+// TestSubscribeAdmissionFailureDoesNotDial proves a barrier-read failure is
+// propagated rather than treated as "open" — it must not permit a new runtime
+// connection.
+func TestSubscribeAdmissionFailureDoesNotDial(t *testing.T) {
+	session := gatewayTestSession()
+	live := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}
+	dialer := &gatewayTestDialer{}
+	store := &gatewayTestStore{session: session, task: live, admissionsErr: errors.New("barrier read failed")}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	var sawErr error
+	for _, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: live.ID}) {
+		sawErr = err
+	}
+	if sawErr == nil {
+		t.Fatal("a barrier-read failure was treated as open admission")
+	}
+	if dialer.session != nil {
+		t.Fatal("a barrier-read failure dialed the runtime")
+	}
+}
+
+// TestSubscribeReopenRestoresLiveSubscription proves a subscribe is refused while
+// closed and then admitted once the barrier reopens on the same store.
+func TestSubscribeReopenRestoresLiveSubscription(t *testing.T) {
+	session := gatewayTestSession()
+	live := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateWorking}}
+	done := &a2atype.Task{ID: "task", ContextID: session.ContextId, Status: a2atype.TaskStatus{State: a2atype.TaskStateCompleted}}
+	runtime := &gatewayTestRuntime{subscribeEvent: done}
+	dialer := &gatewayTestDialer{client: gatewayTestClient(t, runtime)}
+	store := &gatewayTestStore{session: session, task: live, admissionsClosed: true, settledRead: func() error {
+		live.Status.State = a2atype.TaskStateCompleted
+		return nil
+	}}
+	gateway := newTestGateway(store, &gatewayTestAuthorizer{}, dialer, gatewayTestURL)
+
+	// Closed: refused before any dial.
+	var sawErr error
+	for _, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: live.ID}) {
+		sawErr = err
+	}
+	if sawErr == nil || dialer.session != nil {
+		t.Fatalf("closed subscribe = %v dialed=%v, want refusal with no dial", sawErr, dialer.session != nil)
+	}
+
+	// Reopen the same store: a new subscription now dials and delivers.
+	store.admissionsClosed = false
+	dialer.session = nil
+	var got a2atype.Event
+	for event, err := range gateway.SubscribeToTask(gatewayTestContext(), &a2atype.SubscribeToTaskRequest{ID: live.ID}) {
+		if err != nil {
+			t.Fatalf("reopened subscribe = %v", err)
+		}
+		got = event
+	}
+	if got == nil || dialer.session == nil {
+		t.Fatalf("reopened subscribe = %#v dialed=%v", got, dialer.session != nil)
+	}
 }
 
 func TestQuiescentTaskStates(t *testing.T) {

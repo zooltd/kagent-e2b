@@ -113,7 +113,15 @@ func New(cfg AppConfig, executor a2asrv.AgentExecutor) (*KAgentApp, error) {
 		}
 		app.ownedController = controller
 	}
-	tasks := runtimetaskstore.New(controller, apia2a.RuntimeIdentityPath)
+	// Signed-credential mode (E2B and other non-Substrate providers) presents a
+	// kagent-issued credential file instead of the insecure Substrate identity
+	// header. Substrate remains the default when no credential path is set.
+	var tasks *runtimetaskstore.Store
+	if credentialPath := env.KagentRuntimeCredentialPath.Get(); credentialPath != "" {
+		tasks = runtimetaskstore.NewSigned(controller, apia2a.RuntimeIdentityPath, credentialPath)
+	} else {
+		tasks = runtimetaskstore.New(controller, apia2a.RuntimeIdentityPath)
+	}
 	runtimeExecutor := tasks.WrapExecutor(executor, cfg.Telemetry.Runtime, cfg.Flush)
 	executor = runtimeExecutor
 	handlerOpts := []a2asrv.RequestHandlerOption{

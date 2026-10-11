@@ -6,6 +6,7 @@ import (
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube"
@@ -41,6 +42,11 @@ type AgentRuntimeObservation struct {
 	RevisionID v2translator.RevisionID
 	Template   *ateapipb.ActorTemplate
 	Failure    *ReconciliationFailure
+	// E2BReady reports the resolved external artifact passed its readiness
+	// check. It is the E2B analogue of a Substrate golden-snapshot-ready
+	// observation: Template stays nil in that mode and this flag carries the
+	// ready signal instead.
+	E2BReady bool
 }
 
 func (p AgentRuntimeObservation) ResourceName() string {
@@ -60,7 +66,7 @@ func (p AgentRuntimeObservation) Equals(other AgentRuntimeObservation) bool {
 
 // NewCollections creates the complete read-only input graph. An empty
 // watchNamespaces list watches all namespaces.
-func NewCollections(client kube.Client, watchNamespaces []string, opts krt.OptionsBuilder) Collections {
+func NewCollections(client kube.Client, watchNamespaces []string, opts krt.OptionsBuilder, provider string, e2bInstallations map[string]e2b.E2BInstallation, e2bInstallation string) Collections {
 	sandboxTemplates := typedCollection[*kagentv1alpha3.SandboxTemplate](client, watchNamespaces, "SandboxTemplates", opts)
 	agents := typedCollection[*kagentv1alpha3.Agent](client, watchNamespaces, "Agents", opts)
 	agentTemplates := typedCollection[*kagentv1alpha3.AgentTemplate](client, watchNamespaces, "AgentTemplates", opts)
@@ -69,14 +75,14 @@ func NewCollections(client kube.Client, watchNamespaces []string, opts krt.Optio
 	remoteMCPServers := typedCollection[*kagentv1alpha3.RemoteMCPServer](client, watchNamespaces, "RemoteMCPServers", opts)
 	configMaps := typedCollection[*corev1.ConfigMap](client, watchNamespaces, "ConfigMaps", opts)
 	secrets := typedCollection[*corev1.Secret](client, watchNamespaces, "Secrets", opts)
-	workerPools := typedCollection[*atev1alpha1.WorkerPool](client, watchNamespaces, "WorkerPools", opts)
+	workerPools := workerPoolCollection(client, watchNamespaces, opts, provider)
 	agentRuntimeObservations := krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...)
 	modelConfigStatuses, resolvedModelConfigs := newModelConfigReconciliations(modelConfigs, configMaps, secrets, opts)
 	compilerCollections := v2translator.Collections{
 		Harnesses: harnesses, AgentTemplates: agentTemplates, ResolvedModelConfigs: resolvedModelConfigs, RemoteMCPServers: remoteMCPServers,
 		ConfigMaps: configMaps, Secrets: secrets, WorkerPools: workerPools,
 	}
-	reconciliations := newAgentReconciliations(agents, compilerCollections, agentRuntimeObservations, opts)
+	reconciliations := newAgentReconciliations(agents, compilerCollections, agentRuntimeObservations, opts, provider, e2bInstallations, e2bInstallation)
 	statuses := newAgentStatuses(agents, reconciliations, opts)
 
 	return Collections{
@@ -107,4 +113,17 @@ func typedCollection[T controllers.ComparableObject](client kube.Client, namespa
 		collections = append(collections, krt.NewFilteredInformer[T](client, kclient.Filter{Namespace: namespace}, opts.WithName(name+"/"+namespace)...))
 	}
 	return krt.JoinCollection(collections, append(opts.WithName(name), krt.WithJoinUnchecked())...)
+}
+
+// workerPoolCollection returns the WorkerPool input for one provider.
+// WorkerPool is Substrate placement input. Under E2B there is no Substrate CRD
+// set to inform against, so an empty static collection is registered instead
+// of an informer that would block informer sync on a resource that does not
+// exist. E2B compilation never resolves a WorkerPool, so the empty collection
+// is the honest value, not a stub that fakes presence.
+func workerPoolCollection(client kube.Client, namespaces []string, opts krt.OptionsBuilder, provider string) krt.Collection[*atev1alpha1.WorkerPool] {
+	if provider == "e2b" {
+		return krt.NewStaticCollection[*atev1alpha1.WorkerPool](nil, nil, opts.WithName("WorkerPools")...)
+	}
+	return typedCollection[*atev1alpha1.WorkerPool](client, namespaces, "WorkerPools", opts)
 }

@@ -146,7 +146,7 @@ func TestProtobufPersistenceLifecycle(t *testing.T) {
 	task := &a2a.Task{ID: "task", ContextID: session.GetContextId(), Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted},
 		History: []*a2a.Message{{ID: "message", Role: a2a.MessageRoleUser, Parts: a2a.ContentParts{a2a.NewTextPart("hello")}}},
 	}
-	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("request hash"), task, "")
+	_, err = client.CreateRuntimeTask(ctx, session.Id, taskMutationHash("request hash"), task, "", nil)
 	require.NoError(t, err)
 	// Simulate a newer writer using the same binary SQL boundary.
 	taskRow, err := readSessionTask(ctx, q, row.HistoryID, string(task.ID))

@@ -48,6 +48,8 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 	telemetryConfig, _ := v2translator.TelemetryConfigFromProcess()
 	logConfig := telemetryConfig.Logs
 	template, harness := input.Root.Template, input.Harness
+	// Substrate placement is empty under the E2B provider (substrate policy absent/inactive).
+	workerPool, snapshotLocation := harness.SubstratePlacement()
 	// The runtime reports this identity on every invocation span and on its
 	// resource, so a user-supplied resource marker is never required.
 	runtimeTelemetry := telemetryConfig.RuntimeTelemetry(
@@ -134,8 +136,8 @@ func (c *Compiler) Compile(ctx context.Context, input *v2translator.HarnessInput
 			Namespace: template.Namespace,
 			Image:     harness.Spec.Workload.Image, Environment: environment,
 			ConfigJSON: configJSON, AgentCard: card,
-			WorkerPoolName:   harness.Spec.Substrate.WorkerPoolRef.Name,
-			SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
+			WorkerPoolName:   workerPool,
+			SnapshotLocation: snapshotLocation,
 			Credentials:      credentials, Provenance: provenance, EgressDestinations: egress,
 		},
 		Warnings: mcp.warnings,

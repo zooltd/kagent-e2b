@@ -5,17 +5,135 @@ import (
 	"time"
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	ateclient "github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
+	atefake "github.com/agent-substrate/substrate/pkg/client/clientset/versioned/fake"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	kagentclient "github.com/kagent-dev/kagent/go/api/clientset/versioned"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/controller/apiclient"
+	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/krt/krttest"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
+
+var e2bTestInstallations = map[string]e2b.E2BInstallation{
+	"embed-lab": {
+		ClientProxy: "http://proxy:1",
+		Workloads: []e2b.E2BWorkload{{
+			Image:      "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			TemplateID: "tmpl-kagent",
+			BuildID:    "build-kagent",
+			Harness: &e2b.E2BHarnessSpec{
+				Command: "nohup h &", ConfigPath: "/c", CredentialPath: "/cr", ActivatePath: "/a",
+				User: "kagent", Cwd: "/data/workspace",
+			},
+		}},
+	},
+}
+
+// TestE2BReconciliationResolvesArtifactBinding asserts the E2B branch compiles
+// the revision, resolves the workload to a prepared artifact via the
+// installation mapping, and produces an E2B-bound target with no Substrate
+// ActorTemplate — even though the authored Harness still carries an (inactive)
+// Substrate policy.
+func TestE2BReconciliationResolvesArtifactBinding(t *testing.T) {
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	opts := krt.NewOptionsBuilder(stop, "test-e2b", nil)
+
+	template := &kagentv1alpha3.AgentTemplate{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "assistant", UID: "template-uid", Labels: map[string]string{"runtime": "python"}},
+		Spec:       kagentv1alpha3.AgentTemplateSpec{SystemPrompt: "help"},
+	}
+	h := harness("team-a", "kagent", map[string]string{"runtime": "python"})
+	h.UID = "harness-uid"
+	h.Spec.Kagent = &kagentv1alpha3.KagentHarness{}
+	h.Spec.Workload.Image = "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// An authored-but-inactive Substrate policy must not be required to resolve
+	// nor leak into the E2B target.
+	h.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
+		WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
+	}
+	template.Spec.ModelConfig = &corev1.LocalObjectReference{Name: "model"}
+	model := &kagentv1alpha3.ModelConfig{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model", UID: "model-uid"}, Spec: kagentv1alpha3.ModelConfigSpec{
+		Provider: kagentv1alpha3.ModelProviderOpenAI, Model: "gpt-5", APIKeySecret: "model-auth", APIKeySecretKey: "api-key",
+	}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model-auth", UID: "secret-uid"}, Data: map[string][]byte{"api-key": []byte("secret")}}
+	mock := krttest.NewMock(t, []any{h, model, secret})
+	agents := krt.NewStaticCollection(nil, []*kagentv1alpha3.Agent{testAgent(template, h)}, opts.WithName("Agents")...)
+	templates := krt.NewStaticCollection(nil, []*kagentv1alpha3.AgentTemplate{template}, opts.WithName("AgentTemplates")...)
+	configMaps := krttest.GetMockCollection[*corev1.ConfigMap](mock)
+	secrets := krttest.GetMockCollection[*corev1.Secret](mock)
+	_, resolvedModelConfigs := newModelConfigReconciliations(krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts)
+	reconciliations := newAgentReconciliations(agents, v2translator.Collections{
+		Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
+		RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
+		ConfigMaps:       configMaps, Secrets: secrets,
+	}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts, "e2b", e2bTestInstallations, "embed-lab")
+	waitFor(t, func() bool {
+		states := reconciliations.List()
+		return len(states) == 1 && (states[0].CompilationFailure != nil || states[0].Target != nil)
+	})
+	state := reconciliations.List()[0]
+	require.Nil(t, state.CompilationFailure, "E2B reconciliation must compile: %v", state.CompilationFailure)
+	require.NotNil(t, state.Target)
+	require.NotNil(t, state.Target.E2B, "E2B target must carry the resolved artifact binding")
+	require.Nil(t, state.Target.ActorTemplate, "E2B target must not build a Substrate ActorTemplate")
+	require.Equal(t, "embed-lab", state.Target.E2B.Installation)
+	require.Equal(t, "tmpl-kagent", state.Target.E2B.TemplateID)
+	require.Equal(t, "build-kagent", state.Target.E2B.BuildID)
+	require.NotEmpty(t, state.Target.E2B.LaunchContract)
+}
+
+// TestE2BReconciliationUnmappedWorkloadFails asserts a compiled revision whose
+// image/command/args matches no installation workload entry fails preparation
+// closed rather than inventing an artifact.
+func TestE2BReconciliationUnmappedWorkloadFails(t *testing.T) {
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	opts := krt.NewOptionsBuilder(stop, "test-e2b-unmapped", nil)
+
+	template := &kagentv1alpha3.AgentTemplate{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "assistant", UID: "template-uid", Labels: map[string]string{"runtime": "python"}},
+		Spec:       kagentv1alpha3.AgentTemplateSpec{SystemPrompt: "help"},
+	}
+	h := harness("team-a", "kagent", map[string]string{"runtime": "python"})
+	h.UID = "harness-uid"
+	h.Spec.Kagent = &kagentv1alpha3.KagentHarness{}
+	// A different image than the mapping selects -> no workload matches.
+	h.Spec.Workload.Image = "example.com/other@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	template.Spec.ModelConfig = &corev1.LocalObjectReference{Name: "model"}
+	model := &kagentv1alpha3.ModelConfig{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model", UID: "model-uid"}, Spec: kagentv1alpha3.ModelConfigSpec{
+		Provider: kagentv1alpha3.ModelProviderOpenAI, Model: "gpt-5", APIKeySecret: "model-auth", APIKeySecretKey: "api-key",
+	}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model-auth", UID: "secret-uid"}, Data: map[string][]byte{"api-key": []byte("secret")}}
+	mock := krttest.NewMock(t, []any{h, model, secret})
+	agents := krt.NewStaticCollection(nil, []*kagentv1alpha3.Agent{testAgent(template, h)}, opts.WithName("Agents")...)
+	templates := krt.NewStaticCollection(nil, []*kagentv1alpha3.AgentTemplate{template}, opts.WithName("AgentTemplates")...)
+	configMaps := krttest.GetMockCollection[*corev1.ConfigMap](mock)
+	secrets := krttest.GetMockCollection[*corev1.Secret](mock)
+	_, resolvedModelConfigs := newModelConfigReconciliations(krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts)
+	reconciliations := newAgentReconciliations(agents, v2translator.Collections{
+		Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
+		RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
+		ConfigMaps:       configMaps, Secrets: secrets,
+	}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts, "e2b", e2bTestInstallations, "embed-lab")
+	waitFor(t, func() bool {
+		states := reconciliations.List()
+		return len(states) == 1 && states[0].CompilationFailure != nil
+	})
+	state := reconciliations.List()[0]
+	require.Equal(t, "E2BArtifactUnmapped", state.CompilationFailure.Reason)
+	require.Nil(t, state.Target)
+}
 
 func TestReconciliationCollectionsCompileAndObserveRevision(t *testing.T) {
 	stop := make(chan struct{})
@@ -33,7 +151,7 @@ func TestReconciliationCollectionsCompileAndObserveRevision(t *testing.T) {
 	matchingHarness.UID = "harness-uid"
 	matchingHarness.Spec.Kagent = &kagentv1alpha3.KagentHarness{}
 	matchingHarness.Spec.Workload.Image = "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	matchingHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
+	matchingHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
 		WorkerPoolRef:  corev1.LocalObjectReference{Name: "default"},
 		SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
 	}
@@ -61,8 +179,7 @@ func TestReconciliationCollectionsCompileAndObserveRevision(t *testing.T) {
 			Harnesses: collections.Harnesses, AgentTemplates: collections.AgentTemplates, ResolvedModelConfigs: collections.ResolvedModelConfigs,
 			RemoteMCPServers: collections.RemoteMCPServers, ConfigMaps: collections.ConfigMaps,
 			Secrets: collections.Secrets, WorkerPools: collections.WorkerPools,
-		}, collections.AgentRuntimeObservations, opts,
-	)
+		}, collections.AgentRuntimeObservations, opts, "", nil, "")
 	collections.AgentStatuses = newAgentStatuses(collections.Agents, collections.Reconciliations, opts)
 
 	// The Agent informer can observe a new Agent before the template informer
@@ -135,7 +252,7 @@ func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
 			runtimeHarness := harness("team-a", string(harnessType), nil)
 			runtimeHarness.UID = "harness-uid"
 			runtimeHarness.Spec.Workload.Image = "example.com/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			runtimeHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
+			runtimeHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
 				WorkerPoolRef: corev1.LocalObjectReference{Name: "selected"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
 			}
 			responses := kagentv1alpha3.OpenAIAPIFormatResponses
@@ -177,7 +294,7 @@ func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
 				Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModels,
 				RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 				ConfigMaps:       configMaps, Secrets: secrets, WorkerPools: workerPools,
-			}, observations, opts)
+			}, observations, opts, "", nil, "")
 			key := "team-a/assistant"
 			waitFor(t, func() bool {
 				state := reconciliations.GetKey(key)
@@ -285,7 +402,7 @@ func TestClaudeReconciliationCompilesActorTemplate(t *testing.T) {
 	claudeHarness.UID = "harness-uid"
 	claudeHarness.Spec.Claude = &kagentv1alpha3.ClaudeHarness{}
 	claudeHarness.Spec.Workload.Image = "example.com/claude@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	claudeHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
+	claudeHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
 		WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
 	}
 	model := &kagentv1alpha3.ModelConfig{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model", UID: "model-uid"}, Spec: kagentv1alpha3.ModelConfigSpec{
@@ -312,8 +429,7 @@ func TestClaudeReconciliationCompilesActorTemplate(t *testing.T) {
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,
 			WorkerPools: krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
-		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts,
-	)
+		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts, "", nil, "")
 	waitFor(t, func() bool {
 		states := reconciliations.List()
 		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil
@@ -340,7 +456,7 @@ func TestCodexReconciliationCompilesActorTemplate(t *testing.T) {
 	codexHarness.UID = "harness-uid"
 	codexHarness.Spec.Codex = &kagentv1alpha3.CodexHarness{}
 	codexHarness.Spec.Workload.Image = "example.com/codex@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	codexHarness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{
+	codexHarness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{
 		WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"},
 	}
 	model := &kagentv1alpha3.ModelConfig{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model", UID: "model-uid"}, Spec: kagentv1alpha3.ModelConfigSpec{
@@ -368,8 +484,7 @@ func TestCodexReconciliationCompilesActorTemplate(t *testing.T) {
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,
 			WorkerPools: krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
-		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts,
-	)
+		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts, "", nil, "")
 	waitFor(t, func() bool {
 		states := reconciliations.List()
 		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil
@@ -403,7 +518,7 @@ func TestReconciliationTracksSharedAgentTemplate(t *testing.T) {
 	harness := harness("team-a", "kagent", map[string]string{"runtime": "python"})
 	harness.Spec.Kagent = &kagentv1alpha3.KagentHarness{}
 	harness.Spec.Workload.Image = "example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	harness.Spec.Substrate = kagentv1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}}
+	harness.Spec.Substrate = &kagentv1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: kagentv1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}}
 	templates := krt.NewStaticCollection(nil, []*kagentv1alpha3.AgentTemplate{root, child}, opts.WithName("AgentTemplates")...)
 	mock := krttest.NewMock(t, []any{
 		harness,
@@ -421,8 +536,7 @@ func TestReconciliationTracksSharedAgentTemplate(t *testing.T) {
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,
 			WorkerPools: krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock),
-		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts,
-	)
+		}, krttest.GetMockCollection[AgentRuntimeObservation](mock), opts, "", nil, "")
 	var initial string
 	waitFor(t, func() bool {
 		for _, state := range reconciliations.List() {
@@ -469,4 +583,59 @@ func testAgent(template *kagentv1alpha3.AgentTemplate, harness *kagentv1alpha3.H
 	return &kagentv1alpha3.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: template.Namespace, Name: template.Name, UID: template.UID}, Spec: kagentv1alpha3.AgentSpec{
 		TemplateRef: &corev1.LocalObjectReference{Name: template.Name}, HarnessRef: &corev1.LocalObjectReference{Name: harness.Name},
 	}}
+}
+
+// TestE2BWorkerPoolCollectionIsStaticAndEmpty asserts the E2B-only WorkerPool
+// input is an already-synced empty static collection, not an informer that
+// would block sync on a Substrate CRD set that does not exist under E2B. The
+// WorkerPool is Substrate placement input and E2B compilation never resolves
+// one, so the empty collection is the honest value.
+func TestE2BWorkerPoolCollectionIsStaticAndEmpty(t *testing.T) {
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	opts := krt.NewOptionsBuilder(stop, "test-e2b-noworkerpool", nil)
+
+	pools := workerPoolCollection(nil, nil, opts, "e2b")
+	require.True(t, pools.HasSynced(), "E2B WorkerPool collection must already be synced")
+	require.Empty(t, pools.List(), "E2B WorkerPool collection must be empty")
+}
+
+// fakeAPIClient implements apiclient.Client so the registered WorkerPool
+// ListWatch — which asserts c.(apiclient.Client).Substrate() — resolves against
+// a substrate fake clientset. The embedded kube fake supplies the informer
+// factory and RunAndWait; only the substrate accessor carries seeded state.
+type fakeAPIClient struct {
+	kube.Client
+	kagent    kagentclient.Interface
+	substrate ateclient.Interface
+}
+
+func newFakeAPIClient(substrateObjects ...runtime.Object) *fakeAPIClient {
+	return &fakeAPIClient{
+		Client:    kube.NewFakeClient(),
+		substrate: atefake.NewSimpleClientset(substrateObjects...),
+	}
+}
+
+func (c *fakeAPIClient) Kagent() kagentclient.Interface { return c.kagent }
+func (c *fakeAPIClient) Substrate() ateclient.Interface { return c.substrate }
+
+// TestSubstrateWorkerPoolCollectionIsAnInformer guards the complementary
+// branch: under Substrate the WorkerPool input is a real informer reading live
+// WorkerPool objects through the generated substrate client — not yet synced
+// until the client runs — so the E2B-only static substitution did not drop the
+// Substrate input.
+func TestSubstrateWorkerPoolCollectionIsAnInformer(t *testing.T) {
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	apiclient.RegisterTypes()
+	client := newFakeAPIClient(&atev1alpha1.WorkerPool{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "default"}})
+	opts := krt.NewOptionsBuilder(stop, "test-substrate-workerpool", nil)
+
+	pools := workerPoolCollection(client, nil, opts, "substrate")
+	require.True(t, client.RunAndWait(stop), "WorkerPool informer must sync")
+	require.True(t, pools.HasSynced())
+	got := pools.List()
+	require.Len(t, got, 1)
+	require.Equal(t, "default", got[0].Name)
 }

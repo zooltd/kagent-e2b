@@ -57,6 +57,13 @@ var (
 		ComponentAgentRuntime, ComponentTesting,
 	)
 
+	KagentRuntimeCredentialPath = RegisterStringVar(
+		"KAGENT_RUNTIME_CREDENTIAL_PATH",
+		"",
+		"Path to the signed runtime credential file a runtime presents for the controller TaskStore callback instead of the insecure Substrate identity header. When set, the credential is reread on every call and no insecure identity header is sent; when unset, the Substrate identity files are used.",
+		ComponentAgentRuntime,
+	)
+
 	KagentGatewayURL = RegisterStringVar(
 		"KAGENT_GATEWAY_URL",
 		"",

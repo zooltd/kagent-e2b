@@ -214,7 +214,7 @@ func (r *scheduledControllerRuntime) acceptMessage(ctx context.Context, req *a2a
 	if len(dispatch) != 1 {
 		return nil, status.Error(codes.InvalidArgument, "gateway dispatch token missing")
 	}
-	_, err = r.store.CreateRuntimeTask(ctx, sessionID, hash[:], current, dispatch[0])
+	_, err = r.store.CreateRuntimeTask(ctx, sessionID, hash[:], current, dispatch[0], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -253,12 +253,12 @@ func (r *scheduledControllerRuntime) persistTask(ctx context.Context, sessionID 
 		return err
 	}
 	hash := sha256.Sum256(data)
-	version, err = r.store.UpdateSessionTask(ctx, sessionID, version, hash[:], task, task, "")
+	version, err = r.store.UpdateSessionTask(ctx, sessionID, version, hash[:], task, task, "", nil)
 	if err != nil {
 		return err
 	}
 	if task.Status.State.Terminal() || task.Status.State == a2atype.TaskStateAuthRequired {
-		return r.store.SettleSessionTask(ctx, sessionID, string(task.ID), version)
+		return r.store.SettleSessionTask(ctx, sessionID, string(task.ID), version, nil)
 	}
 	return nil
 }

@@ -23,14 +23,24 @@ import (
 )
 
 type Store struct {
-	client       *controllerclient.Client
-	identityPath string
+	client         *controllerclient.Client
+	identityPath   string
+	credentialPath string
 }
 
 var _ sdktaskstore.Store = (*Store)(nil)
 
 func New(client *controllerclient.Client, identityPath string) *Store {
 	return &Store{client: client, identityPath: identityPath}
+}
+
+// NewSigned returns a Store that authenticates each runtime call with a signed
+// credential read from credentialPath instead of the insecure Substrate
+// identity header. The credential file is reread on every call so a renewed
+// same-generation credential is picked up without restart. A missing or empty
+// credential fails the call closed; no insecure header is sent.
+func NewSigned(client *controllerclient.Client, identityPath, credentialPath string) *Store {
+	return &Store{client: client, identityPath: identityPath, credentialPath: credentialPath}
 }
 
 func (s *Store) sessionID() (string, error) {
@@ -56,6 +66,25 @@ func (s *Store) callContext(ctx context.Context) (context.Context, context.Cance
 	md.Delete("x-user-id")
 	md.Delete("x-agent-name")
 	md.Delete("x-share-token")
+	// The runtime never forwards an inherited insecure identity header; the
+	// authentication mode below sets exactly one credential.
+	md.Delete(apia2a.InsecureRuntimeIdentityHeader)
+	if s.credentialPath != "" {
+		// Signed-credential mode (E2B): present only the issued credential as a
+		// bearer token, never the insecure identity header.
+		credential, err := os.ReadFile(s.credentialPath)
+		if err != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("read runtime credential: %w", err)
+		}
+		token := strings.TrimSpace(string(credential))
+		if token == "" {
+			cancel()
+			return nil, nil, fmt.Errorf("runtime credential is empty")
+		}
+		md.Set("authorization", "Bearer "+token)
+		return metadata.NewOutgoingContext(ctx, md), cancel, nil
+	}
 	// Temporary identity transport until Substrate injects actor credentials (#1660).
 	// Reread on every call because restore rebinds these files to the new actor.
 	var identity []string

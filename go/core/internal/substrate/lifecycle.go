@@ -196,3 +196,119 @@ func (t *ActorTransition) checkResult(actor *ateapipb.Actor, state ateapipb.Acto
 	}
 	return nil
 }
+
+// DisabledLifecycleClient is the E2B-only-mode Substrate stub: every operation
+// returns FailedPrecondition so a service constructed with no real ate-api
+// connection fails closed rather than panicking on a nil client. It implements
+// the full *Client method surface the controllers and services consume; it is
+// never a working backend — it exists so an E2B-only deployment can hand
+// services a defined value instead of nil.
+type DisabledLifecycleClient struct{}
+
+// DisabledActorClient returns the shared disabled stub for E2B-only mode.
+func DisabledActorClient() *DisabledLifecycleClient { return &DisabledLifecycleClient{} }
+
+// Close is a no-op so callers can defer it uniformly with a real client.
+func (DisabledLifecycleClient) Close() error { return nil }
+
+var disabledActorErr = status.Error(codes.FailedPrecondition, "substrate runtime is not configured (E2B-only mode)")
+
+func (DisabledLifecycleClient) GetActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) GetActorTemplate(ctx context.Context, atespace, name string) (*ateapipb.ActorTemplate, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) CreateActorTemplate(ctx context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) DeleteActorTemplate(ctx context.Context, atespace, name string) error {
+	return disabledActorErr
+}
+
+func (DisabledLifecycleClient) CreateActor(ctx context.Context, atespace, actorID, tmplNS, tmplName string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) CreateActorFromTag(ctx context.Context, atespace, actorID, tmplNS, tmplName, tagAtespace, tagName string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) ResumeActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) PauseActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) SuspendActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) GetTag(ctx context.Context, atespace, name string) (*ateapipb.Tag, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) CreateTag(ctx context.Context, atespace, name, actorName string) (*ateapipb.Tag, error) {
+	return nil, disabledActorErr
+}
+
+func (DisabledLifecycleClient) DeleteTag(ctx context.Context, atespace, name string) error {
+	return disabledActorErr
+}
+
+func (DisabledLifecycleClient) DeleteActor(ctx context.Context, atespace, actorID string) error {
+	return disabledActorErr
+}
+
+func (DisabledLifecycleClient) EnsureAtespace(ctx context.Context, name string) error {
+	return disabledActorErr
+}
+
+func (DisabledLifecycleClient) EnsureActorEgressPolicy(ctx context.Context, atespace, name string, policy *ateapipb.EgressPolicy) error {
+	return disabledActorErr
+}
+
+func (DisabledLifecycleClient) ListActorsPage(ctx context.Context, atespace string, pageSize int32, pageToken string) ([]*ateapipb.Actor, string, error) {
+	return nil, "", disabledActorErr
+}
+
+func (DisabledLifecycleClient) ListWorkersPage(ctx context.Context, pageSize int32, pageToken string) ([]*ateapipb.Worker, string, error) {
+	return nil, "", disabledActorErr
+}
+
+func (DisabledLifecycleClient) ListActorTemplatesPage(ctx context.Context, atespace string, pageToken string) ([]*ateapipb.ActorTemplate, string, error) {
+	return nil, "", disabledActorErr
+}
+
+func (DisabledLifecycleClient) ListActorTemplates(ctx context.Context, atespace string) ([]*ateapipb.ActorTemplate, error) {
+	return nil, disabledActorErr
+}
+
+// Actors is the union of the *Client surface the controllers and services
+// consume. *Client satisfies it in Substrate mode and *DisabledLifecycleClient
+// in E2B-only mode, so the app can hold one declared type across both.
+type Actors interface {
+	LifecycleClient
+	GetActorTemplate(ctx context.Context, atespace, name string) (*ateapipb.ActorTemplate, error)
+	CreateActorTemplate(ctx context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error)
+	DeleteActorTemplate(ctx context.Context, atespace, name string) error
+	GetTag(ctx context.Context, atespace, name string) (*ateapipb.Tag, error)
+	CreateTag(ctx context.Context, atespace, name, actorName string) (*ateapipb.Tag, error)
+	DeleteTag(ctx context.Context, atespace, name string) error
+	EnsureAtespace(ctx context.Context, name string) error
+	PauseActor(ctx context.Context, atespace, actorID string) (*ateapipb.Actor, error)
+	ListActorsPage(ctx context.Context, atespace string, pageSize int32, pageToken string) ([]*ateapipb.Actor, string, error)
+	ListWorkersPage(ctx context.Context, pageSize int32, pageToken string) ([]*ateapipb.Worker, string, error)
+	ListActorTemplatesPage(ctx context.Context, atespace string, pageToken string) ([]*ateapipb.ActorTemplate, string, error)
+	ListActorTemplates(ctx context.Context, atespace string) ([]*ateapipb.ActorTemplate, error)
+}
+
+var (
+	_ Actors = (*Client)(nil)
+	_ Actors = (*DisabledLifecycleClient)(nil)
+)

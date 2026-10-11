@@ -4,5 +4,5 @@ package migrations
 
 import "embed"
 
-//go:embed core vector
+//go:embed core execution vector
 var FS embed.FS

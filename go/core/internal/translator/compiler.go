@@ -18,6 +18,11 @@ type Compiler struct {
 	ctx              krt.HandlerContext
 	collections      Collections
 	harnessCompilers map[HarnessType]HarnessCompiler
+	// provider selects the execution backend the compile targets. Empty or
+	// "substrate" resolves the Substrate placement (WorkerPool) and requires a
+	// Harness substrate policy; "e2b" skips WorkerPool resolution and treats
+	// any substrate policy as inactive, excluded from placement and digest.
+	provider string
 }
 
 // HarnessType identifies the runtime selected by a Harness.
@@ -88,8 +93,12 @@ type AgentInputBinding struct {
 }
 
 // NewCompiler constructs the v2 runtime compiler.
-func NewCompiler(ctx krt.HandlerContext, collections Collections, harnessCompilers map[HarnessType]HarnessCompiler) *Compiler {
-	return &Compiler{ctx: ctx, collections: collections, harnessCompilers: maps.Clone(harnessCompilers)}
+func NewCompiler(ctx krt.HandlerContext, collections Collections, harnessCompilers map[HarnessType]HarnessCompiler, provider ...string) *Compiler {
+	p := ""
+	if len(provider) > 0 {
+		p = provider[0]
+	}
+	return &Compiler{ctx: ctx, collections: collections, harnessCompilers: maps.Clone(harnessCompilers), provider: p}
 }
 
 // CompileAgent resolves either inline or referenced configuration through the
@@ -157,6 +166,16 @@ func (c *Compiler) compileConfiguration(ctx context.Context, agentName string, h
 	result, err := harnessCompiler.Compile(ctx, input)
 	if err != nil {
 		return nil, err
+	}
+	if c.provider == "e2b" {
+		// E2B placement resolves through the installation's workload mapping,
+		// not a WorkerPool. Any authored substrate policy is inactive and must
+		// not appear in the revision's placement or digest.
+		result.AgentName = agentName
+		return result, nil
+	}
+	if harness.Spec.Substrate == nil {
+		return nil, NewValidationError("Harness requires a substrate policy (spec.substrate) under the Substrate provider")
 	}
 	workerKey := types.NamespacedName{Namespace: harness.Namespace, Name: harness.Spec.Substrate.WorkerPoolRef.Name}
 	workerPool := krt.FetchOne(c.ctx, c.collections.WorkerPools, krt.FilterObjectName(workerKey))

@@ -55,19 +55,19 @@ type lostRuntimeSaveResponse struct {
 	releaseCreate chan struct{}
 }
 
-func (s *lostRuntimeSaveResponse) UpdateSessionTask(ctx context.Context, id string, version int64, hash []byte, task *a2a.Task, event a2a.Event, dispatchID string) (int64, error) {
-	next, err := s.Client.UpdateSessionTask(ctx, id, version, hash, task, event, dispatchID)
+func (s *lostRuntimeSaveResponse) UpdateSessionTask(ctx context.Context, id string, version int64, hash []byte, task *a2a.Task, event a2a.Event, dispatchID string, binding *database.ExecutionInstanceBinding) (int64, error) {
+	next, err := s.Client.UpdateSessionTask(ctx, id, version, hash, task, event, dispatchID, binding)
 	if err == nil && s.lost.CompareAndSwap(false, true) {
 		return 0, status.Error(codes.Unavailable, "lost response after committing runtime save")
 	}
 	return next, err
 }
 
-func (s *lostRuntimeSaveResponse) CreateRuntimeTask(ctx context.Context, id string, hash []byte, task *a2a.Task, dispatchID string) (int64, error) {
+func (s *lostRuntimeSaveResponse) CreateRuntimeTask(ctx context.Context, id string, hash []byte, task *a2a.Task, dispatchID string, binding *database.ExecutionInstanceBinding) (int64, error) {
 	if len(task.History) > 0 && task.History[0].Parts[0].Text() == "reject-create" {
 		return 0, status.Error(codes.FailedPrecondition, "injected initial-save failure")
 	}
-	version, err := s.Client.CreateRuntimeTask(ctx, id, hash, task, dispatchID)
+	version, err := s.Client.CreateRuntimeTask(ctx, id, hash, task, dispatchID, binding)
 	if err == nil && len(task.History) > 0 && task.History[0].Parts[0].Text() == "late" {
 		s.delayedCreate <- string(task.ID)
 		<-s.releaseCreate

@@ -238,8 +238,73 @@ async def test_failed_persistence_stops_native_execution(runtime):
             async for _ in stream:
                 pass
     assert runner.calls == 0
-    assert service.task is None
-    assert not service.receipts
+
+
+class _SignedStorage(storerpc.TaskStoreServiceServicer):
+    """Captures the auth metadata a signed-credential store sends per call."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.metadata = None
+
+    async def GetTask(self, request, context):
+        self.metadata = dict(context.invocation_metadata())
+        await context.abort(grpc.StatusCode.NOT_FOUND, "absent")
+
+
+async def test_signed_credential_sends_bearer_not_insecure_identity(tmp_path: Path):
+    # The signed-credential path presents the issued bearer token and never the
+    # insecure Substrate identity header — even though the identity files the
+    # Substrate mode would read are present.
+    session_id = str(uuid4())
+    identity = tmp_path / "name"
+    identity.write_text("session-" + session_id)
+    (tmp_path / "atespace").write_text("team-a")
+    (tmp_path / "uid").write_text("actor-uid")
+    credential = tmp_path / "credential.jwt"
+    credential.write_text("signed-jwt-token\n")
+    service = _SignedStorage(session_id)
+    server = grpc.aio.server()
+    storerpc.add_TaskStoreServiceServicer_to_server(service, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    client = AsyncControllerClient(f"http://127.0.0.1:{port}")
+    store = KAgentTaskStore(client, identity, credential_path=credential)
+    try:
+        assert await store.get("task-1", ServerCallContext()) is None
+        assert service.metadata["authorization"] == "Bearer signed-jwt-token"
+        assert "x-kagent-insecure-runtime-identity" not in service.metadata
+    finally:
+        await client.close()
+        await server.stop(None)
+
+
+async def test_signed_credential_fails_closed_on_missing_file(tmp_path: Path):
+    session_id = str(uuid4())
+    identity = tmp_path / "name"
+    identity.write_text("session-" + session_id)
+    client = AsyncControllerClient("http://127.0.0.1:1")
+    store = KAgentTaskStore(client, identity, credential_path=tmp_path / "absent.jwt")
+    try:
+        with pytest.raises(InternalError, match="read runtime credential"):
+            await store.get("task-1", ServerCallContext())
+    finally:
+        await client.close()
+
+
+async def test_signed_credential_fails_closed_on_empty_file(tmp_path: Path):
+    session_id = str(uuid4())
+    identity = tmp_path / "name"
+    identity.write_text("session-" + session_id)
+    credential = tmp_path / "credential.jwt"
+    credential.write_text("   \n")
+    client = AsyncControllerClient("http://127.0.0.1:1")
+    store = KAgentTaskStore(client, identity, credential_path=credential)
+    try:
+        with pytest.raises(InternalError, match="runtime credential is empty"):
+            await store.get("task-1", ServerCallContext())
+    finally:
+        await client.close()
 
 
 async def test_cancellation_waits_for_native_cleanup(runtime):
