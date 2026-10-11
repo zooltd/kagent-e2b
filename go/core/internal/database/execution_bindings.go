@@ -632,10 +632,10 @@ func (c *Client) BindE2BSessionCreate(ctx context.Context, sessionID string, id,
 			err := tx.QueryRow(ctx, `
 				SELECT outcome FROM execution_create_attempt WHERE operation_id = $1
 			`, id).Scan(&outcome)
-			if err == nil {
+			switch {
+			case err == nil:
 				return fmt.Errorf("E2B create attempt for operation %s is %q, cannot bind %q: %w", id, derefStr(outcome), binding.ExternalID, ErrConflict)
-			}
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			case !errors.Is(err, pgx.ErrNoRows):
 				return fmt.Errorf("verify E2B create attempt outcome: %w", err)
 			}
 			// err == pgx.ErrNoRows: no attempt recorded — proceed (fixtures only).

@@ -421,6 +421,9 @@ func validHarness(namespace, name string, overrides HarnessSpec) *Harness {
 	if overrides.Workload.Image == "" {
 		overrides.Workload.Image = "registry.example.com/kagent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	}
+	if overrides.Substrate == nil {
+		overrides.Substrate = &RuntimeSubstratePolicy{}
+	}
 	if overrides.Substrate.WorkerPoolRef.Name == "" {
 		overrides.Substrate.WorkerPoolRef.Name = "default"
 	}

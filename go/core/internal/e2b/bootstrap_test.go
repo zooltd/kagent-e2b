@@ -254,7 +254,7 @@ func TestBootstrapWritesCABundleBeforeActivate(t *testing.T) {
 			actIdx = i
 		}
 	}
-	if credIdx < 0 || caIdx < 0 || actIdx < 0 || !(credIdx < caIdx && caIdx < actIdx) {
+	if credIdx < 0 || caIdx < 0 || actIdx < 0 || credIdx >= caIdx || caIdx >= actIdx {
 		t.Fatalf("want credential -> ca.pem -> activate order, got %v", envdSpy.writes)
 	}
 	if envdSpy.bodies["/run/kagent/ca.pem"] != "CAPEM" {

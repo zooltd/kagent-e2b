@@ -312,12 +312,6 @@ func (c *EnvdClient) RunCommand(ctx context.Context, cmd string, envs map[string
 	return readProcessResult(resp.Body)
 }
 
-// envdFileReadCap is the maximum bytes a single envd file read returns —
-// verified live: a 20MiB file reads back as exactly 8MiB. Export/restore chunk
-// archives beneath this bound so a workspace larger than one read still
-// transfers intact.
-const envdFileReadCap = 8 << 20
-
 // ExportDataLimit bounds the compressed archive ExportData will return. The
 // checkpoint archive is stored in PostgreSQL bytea, so a checkpoint is a
 // bounded /data, not uncontrolled growth: the limit is enforced during
@@ -382,12 +376,12 @@ func (c *EnvdClient) ExportData(ctx context.Context, dir string) ([]byte, error)
 	// part: a source over the bound aborts without buffering it. This is the
 	// during-collection enforcement the storage bound requires — the SQL
 	// CHECK alone would let an oversized export land before being rejected.
-	for _, part := range strings.Fields(parts.Stdout) {
-		if strings.HasPrefix(part, "SIZE=") {
-			wantSize = strings.TrimPrefix(part, "SIZE=")
+	for part := range strings.FieldsSeq(parts.Stdout) {
+		if v, ok := strings.CutPrefix(part, "SIZE="); ok {
+			wantSize = v
 		}
-		if strings.HasPrefix(part, "SHA=") {
-			wantSHA = strings.TrimPrefix(part, "SHA=")
+		if v, ok := strings.CutPrefix(part, "SHA="); ok {
+			wantSHA = v
 		}
 	}
 	if wantSize != "" {
@@ -395,7 +389,7 @@ func (c *EnvdClient) ExportData(ctx context.Context, dir string) ([]byte, error)
 			return nil, fmt.Errorf("export archive %d bytes exceeds the %d-byte checkpoint bound", n, ExportDataLimit)
 		}
 	}
-	for _, part := range strings.Fields(parts.Stdout) {
+	for part := range strings.FieldsSeq(parts.Stdout) {
 		if strings.HasPrefix(part, "SIZE=") {
 			continue
 		}
@@ -426,19 +420,6 @@ func (c *EnvdClient) ExportData(ctx context.Context, dir string) ([]byte, error)
 		}
 	}
 	return got, nil
-}
-
-// readFileExact reads path and verifies the byte count. A truncated read —
-// envd caps one read at envdFileReadCap — is an error, not a silent short file.
-func (c *EnvdClient) readFileExact(ctx context.Context, path string, want int64) ([]byte, error) {
-	data, err := c.ReadFile(ctx, path, 0)
-	if err != nil {
-		return nil, err
-	}
-	if want >= 0 && int64(len(data)) != want {
-		return nil, fmt.Errorf("read %s truncated: got %d bytes, want %d", path, len(data), want)
-	}
-	return data, nil
 }
 
 // RestoreData unpacks a previously-exported gzip tar back over dir inside the
@@ -526,8 +507,8 @@ func readProcessResult(r io.Reader) (*CommandResult, error) {
 // read as success.
 func exitCodeFromStatus(status string) int {
 	const prefix = "exit status "
-	if strings.HasPrefix(status, prefix) {
-		if code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(status, prefix))); err == nil {
+	if rest, ok := strings.CutPrefix(status, prefix); ok {
+		if code, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
 			return code
 		}
 	}

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,10 +54,8 @@ func (s *fakeOrphanStore) E2BOrphanDeletionGate(_ context.Context, operationID u
 	if s.bound[installation+"/"+external] {
 		return false, nil // live binding claims it
 	}
-	for _, op := range s.openOps {
-		if op == operationID {
-			return false, nil // still an open CREATE
-		}
+	if slices.Contains(s.openOps, operationID) {
+		return false, nil // still an open CREATE
 	}
 	return true, nil
 }

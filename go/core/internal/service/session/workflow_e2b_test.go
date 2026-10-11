@@ -801,9 +801,7 @@ func TestE2BCrashedExecutorIntentReconciledBySweep(t *testing.T) {
 	client := database.NewClient(pool, "public")
 
 	revision := &database.RuntimeRevision{
-		Revision: "e2b-rev-1", Namespace: "team-a", AgentName: "assistant", AgentUID: "agent-uid",
-		SourceSnapshot: []byte(`{"provenance":true}`), AgentCard: &a2apb.AgentCard{},
-		EgressDestinations: []string{"h:1"}, Provider: database.ExecutionProviderE2B,
+		Revision: "e2b-rev-1", EgressDestinations: []string{"h:1"},
 	}
 	require.NoError(t, client.UpsertAgentDefinition(ctx, database.AgentDefinition{
 		Namespace: "team-a", AgentName: "assistant", AgentUID: "agent-uid", DesiredRevision: revision.Revision}))

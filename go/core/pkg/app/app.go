@@ -905,9 +905,7 @@ func e2bContractEnvs(h a2agateway.E2BHarnessSpec, inst a2agateway.E2BInstallatio
 	// Contract-declared wiring first — the harness's own overrides (e.g. its
 	// model base-url pointed at the credential broker). These are operator
 	// values that always win over a same-named revision env entry.
-	for k, v := range h.Env {
-		envs[k] = v
-	}
+	maps.Copy(envs, h.Env)
 	// Point the harness's declared model base-url at the installation's
 	// credential broker so model traffic and its credentials stay outside the
 	// guest; an authored revision env of the same name never overrides it.
@@ -973,12 +971,12 @@ func e2bArtifactReadiness(installations map[string]a2agateway.E2BInstallation) f
 func validateExecutionProviderConfig(provider, signingKeyFile string) error {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	hasKey := signingKeyFile != ""
-	switch {
-	case p == "e2b":
+	switch p {
+	case "e2b":
 		// Supported: signing key + e2b is the real E2B deployment; keyless is
 		// evaluation-only (a create fails in preparation without a credential
 		// to write, an already-enforced precondition).
-	case p == "" || p == "substrate":
+	case "", "substrate":
 		// Signing key + Substrate breaks its insecure-header callbacks.
 		if hasKey {
 			return fmt.Errorf("KAGENT_EXECUTION_SIGNING_KEY_FILE requires KAGENT_EXECUTION_PROVIDER=e2b: a signing key makes the runtime-callback endpoint signed-only and Substrate guests send the insecure identity header")

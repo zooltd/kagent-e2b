@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -70,7 +70,7 @@ func BuildEgressNetworkConfig(in EgressInput) (*NetworkConfig, error) {
 	for h := range allow {
 		out = append(out, h)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return &NetworkConfig{AllowOut: out, DenyOut: []string{DenyAllTraffic}}, nil
 }
 

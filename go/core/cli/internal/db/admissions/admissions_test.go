@@ -162,13 +162,13 @@ func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestAdmissionsReportTextWriterFailurePropagates(t *testing.T) {
 	report := &database.AdmissionReport{AdmissionsClosed: false}
-	err := writeReportText(errWriter{err: assertErr}, report)
-	require.ErrorIs(t, err, assertErr, "a failing text writer must surface an error")
-	err = writeReportJSON(errWriter{err: assertErr}, report)
-	require.ErrorIs(t, err, assertErr, "a failing JSON writer must surface an error")
+	err := writeReportText(errWriter{err: errSinkWrite}, report)
+	require.ErrorIs(t, err, errSinkWrite, "a failing text writer must surface an error")
+	err = writeReportJSON(errWriter{err: errSinkWrite}, report)
+	require.ErrorIs(t, err, errSinkWrite, "a failing JSON writer must surface an error")
 }
 
-var assertErr = errors.New("sink write failed")
+var errSinkWrite = errors.New("sink write failed")
 
 // TestAdmissionsReportAgainstPostgres proves the report prints the barrier
 // state and every section header against a real migrated database, and that a

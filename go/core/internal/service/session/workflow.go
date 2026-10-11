@@ -147,9 +147,6 @@ type E2BProvider struct {
 // error so create fails closed.
 type E2BProviderLookup func(installation string) (*E2BProvider, error)
 
-// boolPtr returns a *bool for the optional create flags.
-func boolPtr(v bool) *bool { return &v }
-
 // ActorWorkflow runs the imperative Substrate operations behind Session
 // lifecycle RPCs. Only the claiming caller issues lifecycle mutations; others
 // observe current completion or receive a pending/superseded-operation error.
@@ -652,15 +649,15 @@ func (w *ActorWorkflow) e2bCreate(ctx context.Context, operation *database.Sessi
 		// path the gateway relies on. autoPauseMemory retains the memory image
 		// so a resumed sandbox keeps its live identity.
 		Timeout:         provider.Config.SandboxTimeoutSeconds,
-		AutoPause:       boolPtr(true),
-		AutoPauseMemory: boolPtr(true),
+		AutoPause:       new(true),
+		AutoPauseMemory: new(true),
 		AutoResume:      &e2b.AutoResumeConfig{Enabled: true},
 		// Secure makes the provider mint a per-sandbox envdAccessToken the
 		// bootstrap probe needs to reach envd through the proxy; without it the
 		// create returns no access token and file/process activation is
 		// impossible. It is the private-ingress credential, distinct from the
 		// traffic token and the runtime credential.
-		Secure: boolPtr(true),
+		Secure: new(true),
 		Metadata: map[string]string{
 			"kagent.dev/session":   sessionID,
 			"kagent.dev/operation": operation.ID.String(),

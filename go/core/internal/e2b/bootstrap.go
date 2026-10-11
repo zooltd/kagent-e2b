@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 )
@@ -165,14 +166,10 @@ func (b *Bootstrapper) launchEnvs(revision map[string]string) map[string]string 
 		return nil
 	}
 	out := make(map[string]string, len(revision)+len(b.command.Envs))
-	for k, v := range revision {
-		out[k] = v
-	}
+	maps.Copy(out, revision)
 	// Contract-owned keys override revision entries; the binding environment is
 	// a base layer, never the authority for E2B-owned wiring.
-	for k, v := range b.command.Envs {
-		out[k] = v
-	}
+	maps.Copy(out, b.command.Envs)
 	return out
 }
 

@@ -591,7 +591,7 @@ func TestE2BOrphanDeletionGateRejectsBoundSandbox(t *testing.T) {
 	op, _ := client.BeginSessionOperation(ctx, session.Id, apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE)
 	executor := uuid.New()
 	_, _ = client.ClaimSessionOperation(ctx, session.Id, op.ID, executor)
-	_, _, _ = client.RecordE2BCreateAttempt(ctx, session.Id, op.ID, executor, "embed-lab")
+	_, _, _ = client.RecordE2BCreateAttempt(ctx, session.Id, op.ID, executor, "embed-lab") //nolint:dogsled
 	require.NoError(t, client.BindE2BSessionCreate(ctx, session.Id, op.ID, executor, E2BCreateBinding{
 		Installation: "embed-lab", ExternalID: "sb-bound", Generation: 1,
 	}))
@@ -618,7 +618,7 @@ func TestE2BOrphanDeletionGateApprovesCommittedOrphan(t *testing.T) {
 	op, _ := client.BeginSessionOperation(ctx, session.Id, apiv1alpha1.RuntimeOperation_RUNTIME_OPERATION_CREATE)
 	executor := uuid.New()
 	_, _ = client.ClaimSessionOperation(ctx, session.Id, op.ID, executor)
-	_, _, _ = client.RecordE2BCreateAttempt(ctx, session.Id, op.ID, executor, "embed-lab")
+	_, _, _ = client.RecordE2BCreateAttempt(ctx, session.Id, op.ID, executor, "embed-lab") //nolint:dogsled
 	require.NoError(t, client.MarkE2BCreateAttemptKnown(ctx, op.ID, "sb-orphan"))
 
 	// The executor's claim must fully lapse before a DELETE can supersede the
