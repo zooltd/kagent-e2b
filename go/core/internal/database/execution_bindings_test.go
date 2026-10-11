@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1074,21 +1073,32 @@ func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
 	// While the writer holds the session lock (queued on the binding lock A
 	// holds), probe whether the session row is lock-free. session_record is a
 	// view, so NOWAIT must target the base runtime_instance row lockSession
-	// actually locks. If the writer already passed the session lock, NOWAIT
-	// fails — proving the writer took session BEFORE binding (session-first).
-	var sessionLocked atomic.Bool
+	// actually locks. The probe needs its own transaction — pgx transactions
+	// are not goroutine-safe, so txA cannot be queried from another goroutine.
+	// A dedicated probe tx waits on the binding lock A holds, which is fine:
+	// NOWAIT on the session row reports immediately regardless.
+	probeDone := make(chan bool, 1)
 	go func() {
+		txB, err := client.db.Begin(ctx)
+		if err != nil {
+			probeDone <- false
+			return
+		}
+		defer txB.Rollback(ctx) //nolint:errcheck
 		var lockedID uuid.UUID
-		serr := txA.QueryRow(ctx, `
+		serr := txB.QueryRow(ctx, `
 			SELECT id FROM runtime_instance WHERE id = $1 FOR UPDATE NOWAIT
 		`, session.Id).Scan(&lockedID)
-		if serr != nil {
-			// NOWAIT failed: the writer holds the session lock while queued on
-			// the binding => it acquired session FIRST. Confirmed.
-			sessionLocked.Store(true)
-		}
+		// NOWAIT failing means the writer holds the session lock while queued
+		// on the binding => it acquired session FIRST. Confirmed.
+		probeDone <- serr != nil
 	}()
-	time.Sleep(400 * time.Millisecond)
+	var sessionLocked bool
+	select {
+	case sessionLocked = <-probeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session-lock probe did not complete — possible lock inversion")
+	}
 
 	require.NoError(t, txA.Rollback(ctx))
 	select {
@@ -1102,7 +1112,7 @@ func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("writer did not complete after binding lock released — possible lock inversion")
 	}
-	require.True(t, sessionLocked.Load(),
+	require.True(t, sessionLocked,
 		"writer held the session lock while queued on the binding lock — session-first order confirmed")
 }
 
