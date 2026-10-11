@@ -46,6 +46,7 @@ This reference covers user-configurable settings for the controller, CLI, standa
 | `KAGENT_OPENAI_AGENTS_NATIVE_TRACING` | Boolean | `false` | Keep the OpenAI Agents SDK native tracing processor alongside kagent OpenTelemetry export in the Python OpenAI runtime. |
 | `KAGENT_PORT` | String | `(none)` | ADK A2A listen port: the Go HTTP/gRPC listener defaults to 8080; the Python gRPC listener defaults to 80. Explicit Go --port/AppConfig.Port or Python a2a_grpc_address takes precedence. The controller sets 80 for managed kagent runtimes. Python's HTTP --port is separate. |
 | `KAGENT_PROPAGATE_TOKEN` | String | `(none)` | Set to true to propagate authentication tokens to downstream services. Unset or any other value disables propagation. |
+| `KAGENT_RUNTIME_CREDENTIAL_PATH` | String | `(none)` | Path to the signed runtime credential file a runtime presents for the controller TaskStore callback instead of the insecure Substrate identity header. When set, the credential is reread on every call and no insecure identity header is sent; when unset, the Substrate identity files are used. |
 | `KAGENT_SKILLS_FOLDER` | String | `/skills` | Skills directory for standalone Python skills tools. The Python ADK adds skills tools when set; managed Go ADK runtimes use their compiled skill configuration. |
 | `KAGENT_STS_AUDIENCE` | String | `(none)` | Comma-separated RFC 8693 audiences sent on STS token-exchange requests. Alternate to KAGENT_STS_RESOURCE for servers that key on audience. |
 | `KAGENT_STS_RESOURCE` | String | `(none)` | Comma-separated RFC 8707 resource indicators sent on STS token-exchange requests to scope issued tokens to target backends. |
@@ -128,8 +129,15 @@ This reference covers user-configurable settings for the controller, CLI, standa
 | `KAGENT_AUTH_USER_ID_CLAIM` | String | `(none)` | JWT claim used for the caller identity in trusted-proxy mode. Empty uses sub; a missing or empty custom claim falls back to sub. |
 | `KAGENT_CONTROLLER_NAME` | String | `kagent-controller` | Name of the kagent controller service. |
 | `KAGENT_DATABASE_VECTOR_ENABLED` | Boolean | `false` | Enable vector database migrations and vector-backed database functionality. The controller defaults to false. When unset in the CLI, migrations read the controller ConfigMap and fall back to false if it is unavailable. |
+| `KAGENT_E2B_INSTALLATION` | String | `(none)` | The E2B installation identity (a key of KAGENT_E2B_INSTALLATIONS) the provider prepares new revisions against. Required in E2B-only mode; revisions pin it into their artifact binding. |
+| `KAGENT_E2B_INSTALLATIONS` | String | `(none)` | JSON map of E2B installation identity to endpoint config, e.g. {"embed-lab": {"clientProxy": "http://127.0.0.1:3002"}}. When empty, E2B sessions cannot be dialed; Substrate stays the default provider. |
+| `KAGENT_E2B_SANDBOX_TIMEOUT` | Duration | `0s` | Lifetime an E2B sandbox is created with (e.g. 1h). With autoPause it is a timeout-to-pause bound; admitted tasks renew it. Zero uses the provider's own default. |
+| `KAGENT_EXECUTION_PROVIDER` | String | `(none)` | Runtime provider mode: empty or 'substrate' keeps Substrate as the default; 'e2b' runs E2B-only — no ate-api dial or Substrate clients, standalone Sandbox/guest ops return FailedPrecondition. |
+| `KAGENT_EXECUTION_SIGNING_KEY_FILE` | String | `(none)` | File holding the HMAC key the controller uses to sign and verify E2B execution-provider runtime credentials. When set, the private runtime callback also accepts signed E2B credentials; when unset, only the Substrate identity path is served. |
 | `KAGENT_GATEWAY_URL` | String | `(none)` | Base URL for A2A and MCP traffic. The controller falls back to http://127.0.0.1:8083; Python runtimes require a value. |
 | `KAGENT_GRPC_REFLECTION` | Boolean | `false` | Enable gRPC server reflection on the controller. |
+| `KAGENT_GRPC_TLS_CERT_FILE` | String | `(none)` | PEM certificate file the controller server serves for TLS. Requires KAGENT_GRPC_TLS_KEY_FILE; unset keeps the plaintext listener. |
+| `KAGENT_GRPC_TLS_KEY_FILE` | String | `(none)` | PEM private-key file matching KAGENT_GRPC_TLS_CERT_FILE. Requires KAGENT_GRPC_TLS_CERT_FILE; unset keeps the plaintext listener. |
 | `KAGENT_HTTP_BIND_ADDRESS` | String | `:8083` | Listen address for the controller HTTP, gRPC, A2A, and MCP server. |
 | `KAGENT_LEADER_ELECT` | Boolean | `true` | Enable controller leader election, including during single-replica rolling updates. Required for sandbox lifecycle coordination. |
 | `KAGENT_LOG_LEVEL` | String | `info` | Logging level for the controller, CLI, and Go/Python runtimes, including the Python ADK HTTP server: debug, info, warn, or error. Python also accepts standard Python logging levels. |
