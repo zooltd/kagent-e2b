@@ -763,7 +763,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].startupProbe.httpGet.path
-          value: /health
+          value: /
       - equal:
           path: spec.template.spec.containers[0].startupProbe.periodSeconds
           value: 15
@@ -776,7 +776,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.path
-          value: /health
+          value: /
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.periodSeconds
           value: 30
@@ -979,3 +979,55 @@ tests:
           content:
             name: KAGENT_METRICS_BIND_ADDRESS
             value: "0"
+
+  - it: default probes use HTTPS when the gRPC TLS certificate is configured
+    template: controller-deployment.yaml
+    set:
+      controller.execution.grpcTLSCertFile: /run/secrets/tls.crt
+      controller.execution.grpcTLSKeyFile: /run/secrets/tls.key
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.scheme
+          value: HTTPS
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.scheme
+          value: HTTPS
+
+  - it: default probes keep the plaintext scheme without TLS configured
+    template: controller-deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.scheme
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.scheme
+
+  - it: explicit probe overrides are preserved with TLS configured
+    template: controller-deployment.yaml
+    set:
+      controller.execution.grpcTLSCertFile: /run/secrets/tls.crt
+      controller.execution.grpcTLSKeyFile: /run/secrets/tls.key
+      controller.startupProbe:
+        httpGet:
+          path: /startupz
+          port: http
+          scheme: HTTPS
+        periodSeconds: 5
+      controller.readinessProbe:
+        httpGet:
+          path: /readyz
+          port: http
+          scheme: HTTPS
+        periodSeconds: 7
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /startupz
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 5
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 7

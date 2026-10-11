@@ -111,3 +111,52 @@ tests:
       - equal:
           path: data.KAGENT_SANDBOX_GUEST_IMAGE
           value: mirror.example.com/team/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  - it: omits execution-provider keys by default
+    asserts:
+      - notExists:
+          path: data.KAGENT_EXECUTION_PROVIDER
+      - notExists:
+          path: data.KAGENT_EXECUTION_SIGNING_KEY_FILE
+      - notExists:
+          path: data.KAGENT_GRPC_TLS_CERT_FILE
+      - notExists:
+          path: data.KAGENT_GRPC_TLS_KEY_FILE
+      - notExists:
+          path: data.KAGENT_E2B_INSTALLATION
+      - notExists:
+          path: data.KAGENT_E2B_INSTALLATIONS
+      - notExists:
+          path: data.KAGENT_E2B_SANDBOX_TIMEOUT
+
+  - it: emits E2B-only mode and installation config
+    set:
+      controller.execution.provider: e2b
+      controller.execution.signingKeyFile: /run/secrets/execution.key
+      controller.execution.grpcTLSCertFile: /run/secrets/tls.crt
+      controller.execution.grpcTLSKeyFile: /run/secrets/tls.key
+      controller.execution.e2b.installations: '{"embed-prod":{"clientProxy":"http://e2b-proxy:3002","api":"http://e2b-api:3000","apiKey":"k"}}'
+      controller.execution.e2b.installation: embed-prod
+      controller.execution.e2b.sandboxTimeout: 1h
+    asserts:
+      - equal:
+          path: data.KAGENT_EXECUTION_PROVIDER
+          value: e2b
+      - equal:
+          path: data.KAGENT_EXECUTION_SIGNING_KEY_FILE
+          value: /run/secrets/execution.key
+      - equal:
+          path: data.KAGENT_GRPC_TLS_CERT_FILE
+          value: /run/secrets/tls.crt
+      - equal:
+          path: data.KAGENT_GRPC_TLS_KEY_FILE
+          value: /run/secrets/tls.key
+      - equal:
+          path: data.KAGENT_E2B_INSTALLATION
+          value: embed-prod
+      - equal:
+          path: data.KAGENT_E2B_INSTALLATIONS
+          value: '{"embed-prod":{"clientProxy":"http://e2b-proxy:3002","api":"http://e2b-api:3000","apiKey":"k"}}'
+      - equal:
+          path: data.KAGENT_E2B_SANDBOX_TIMEOUT
+          value: 1h

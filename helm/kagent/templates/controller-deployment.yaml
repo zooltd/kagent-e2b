@@ -146,8 +146,13 @@ spec:
           {{- else }}
           startupProbe:
             httpGet:
-              path: /health
+              # The controller serves "/" for health (rootHealthHandler); it
+              # never registered "/health". Probe the served root.
+              path: /
               port: http
+              {{- if .Values.controller.execution.grpcTLSCertFile }}
+              scheme: HTTPS
+              {{- end }}
             periodSeconds: 15
             initialDelaySeconds: 15
           {{- end }}
@@ -157,8 +162,11 @@ spec:
           {{- else }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /
               port: http
+              {{- if .Values.controller.execution.grpcTLSCertFile }}
+              scheme: HTTPS
+              {{- end }}
             periodSeconds: 30
           {{- end }}
           {{- if or (gt (len .Values.controller.volumeMounts) 0) (and .Values.controller.substrate .Values.controller.substrate.enabled) }}

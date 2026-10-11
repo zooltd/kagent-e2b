@@ -93,6 +93,11 @@ cleanup. Session lifecycle workers independently pause/suspend idle Actors.
 - [Prompt resolution](prompt-templates.md)
 - [Telemetry](telemetry.md)
 - [Structured output](structured-output.md)
+- [E2B execution provider](e2b-execution-provider.md)
+- [E2B supervisor contract](e2b-supervisor-contract.md)
+- [E2B capability matrix](e2b-capability-matrix.md)
+- [E2B upstream sync](e2b-upstream-sync.md)
+- [E2B checkpoint/fork design](e2b-checkpoint-fork-design.md)
 
 The documents describe implemented behavior. Full cross-Session delegation
 and Dedicated agents remain deferred.

@@ -440,6 +440,68 @@ controller:
     #   enabled: true
     #   ateApiEndpoint: "dns:///api.ate-system.svc:443"
     #   atenetRouterURL: "http://atenet-router.ate-system.svc:80"
+
+  # Execution provider selection. Empty keeps Substrate as the default
+  # runtime. "e2b" runs E2B-only: no ate-api dial or Substrate reconcilers,
+  # and standalone Sandbox/guest/PTY/file operations return
+  # FailedPrecondition. This is a deployment-mode decision, not per-session.
+  execution:
+    provider: ""
+    # File path of the HMAC key the controller uses to sign and verify E2B
+    # execution-provider runtime credentials. Mount it via
+    # controller.volumes/volumeMounts from a Secret; without it, only the
+    # Substrate identity path is served and E2B callbacks are unauthenticated.
+    signingKeyFile: ""
+    # TLS keypair the controller's combined server (public HTTP/gRPC + the
+    # private runtime callback) serves. E2B deployments set both so the
+    # sandbox's signed runtime credential travels over an authenticated
+    # channel; the certificate's SAN must cover the callback host the
+    # installation's "callback" URL names. Mount the pair via
+    # controller.volumes/volumeMounts from a Secret. Both empty keeps the
+    # plaintext default used by Substrate and local development.
+    grpcTLSCertFile: ""
+    grpcTLSKeyFile: ""
+    # Self-hosted E2B (Embed) installations, keyed by the immutable
+    # installation identity stored in execution bindings. The value is a JSON
+    # map; each entry supplies that installation's endpoints. All endpoints
+    # must be private to trusted control-plane clients — the client proxy's
+    # E2b-Sandbox-* routing headers are not authentication, and the apiKey
+    # authenticates control-plane calls.
+    # Example:
+    #   installations: >-
+    #     {"embed-prod": {"clientProxy": "http://e2b-proxy.e2b.svc:3002",
+    #       "api": "http://e2b-api.e2b.svc:3000", "apiKey": "<key>",
+    #       "broker": "http://kagent-modelbroker.kagent.svc:8080",
+    #       "callback": "https://kagent-controller.kagent.svc:8083",
+    #       "callbackCABundle": "<PEM for the callback TLS endpoint>",
+    #       "workloads": [{
+    #         "image": "registry.example.com/agent@sha256:<digest>",
+    #         "templateId": "<e2b template id>", "buildId": "<e2b ready build id>",
+    #         "harness": {
+    #           "command": "export KAGENT_CONFIG_JSON=\"$(cat /run/kagent/config.json)\" KAGENT_AGENT_CARD_JSON=\"$(cat /run/kagent/agent-card.json)\" KAGENT_RUNTIME_CREDENTIAL_PATH=/run/kagent/credential.jwt SSL_CERT_FILE=/run/kagent/ca.pem; nohup /usr/local/bin/kagent-codex >>/tmp/harness.log 2>&1 &",
+    #           "configPath": "/run/kagent/config.json",
+    #           "agentCardPath": "/run/kagent/agent-card.json",
+    #           "credentialPath": "/run/kagent/credential.jwt",
+    #           "caPath": "/run/kagent/ca.pem",
+    #           "activatePath": "/run/kagent/activate",
+    #           "user": "kagent", "cwd": "/data/workspace"}}]}}
+    # Each workloads entry maps a compiled harness workload (pinned image +
+    # ordered command/args) to the E2B template/build that runs it; a managed
+    # harness with no command/args selects on image alone. harness is that
+    # workload's supervisor contract — the detached launch and guest paths the
+    # bootstrap probe drives.
+    # Operators preferring a Secret over a ConfigMap can instead inject
+    # KAGENT_E2B_INSTALLATIONS through controller.envFrom.
+    e2b:
+      # The single installation identity (a key of installations) the provider
+      # prepares new revisions against. Required when provider is "e2b";
+      # ignored otherwise. An explicit selection, never a first-key guess.
+      installation: ""
+      installations: ""
+      # Lifetime an E2B sandbox is created with (e.g. "1h"). With the
+      # provider's autoPause it is a timeout-to-pause bound; admitted tasks
+      # renew it. Empty uses the provider's own default.
+      sandboxTimeout: ""
   envFrom: []
 
   # Additional volumes on the output Deployment definition.

@@ -98,3 +98,32 @@ data:
   KAGENT_SUBSTRATE_ATENET_ROUTER_URL: {{ . | quote }}
   {{- end }}
   {{- end }}
+  {{- with .Values.controller.execution }}
+  {{- with .provider }}
+  KAGENT_EXECUTION_PROVIDER: {{ . | quote }}
+  {{- end }}
+  {{- with .signingKeyFile }}
+  KAGENT_EXECUTION_SIGNING_KEY_FILE: {{ . | quote }}
+  {{- end }}
+  {{- with .grpcTLSCertFile }}
+  KAGENT_GRPC_TLS_CERT_FILE: {{ . | quote }}
+  {{- end }}
+  {{- with .grpcTLSKeyFile }}
+  KAGENT_GRPC_TLS_KEY_FILE: {{ . | quote }}
+  {{- end }}
+  {{- with .e2b }}
+  {{- with .installation }}
+  KAGENT_E2B_INSTALLATION: {{ . | quote }}
+  {{- end }}
+  {{- with .installations }}
+  {{- /* API keys live in this map; it stays operator config and is never
+         written to durable state. It sits in a ConfigMap today, matching how
+         the chart already handles non-secret operator endpoints — operators
+         wanting it in a Secret can use controller.envFrom instead. */}}
+  KAGENT_E2B_INSTALLATIONS: {{ . | quote }}
+  {{- end }}
+  {{- if .sandboxTimeout }}
+  KAGENT_E2B_SANDBOX_TIMEOUT: {{ .sandboxTimeout | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
