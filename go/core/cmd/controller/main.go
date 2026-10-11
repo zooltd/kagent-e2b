@@ -49,7 +49,7 @@ func main() {
 		Authenticator: authenticator,
 		// Fork-owned execution-provider bindings, applied after the built-in
 		// sources via their own tracking table and advisory lock.
-		ExtraMigrations: []migrations.Source{migrations.ExecutionSource()},
+		ExtraMigrations: []migrations.Source{migrations.ExecutionSourceInSchema(env.DatabaseSchema.Get())},
 	}); err != nil {
 		logger.ErrorContext(ctx, "controller stopped", "error", err)
 		os.Exit(1)

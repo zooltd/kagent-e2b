@@ -15,7 +15,7 @@ import (
 // verifies the report inventories them with the right classifications. It is a
 // database observation only — no provider state is implied.
 func TestAdmissionReportSnapshot(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 
@@ -266,7 +266,7 @@ func TestAdmissionReportSnapshot(t *testing.T) {
 // barrier state and continues to inventory work while admissions are closed —
 // the report observes the barrier; it does not gate on it.
 func TestAdmissionReportSnapshotAfterClose(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -286,7 +286,7 @@ func TestAdmissionReportSnapshotAfterClose(t *testing.T) {
 // TestAdmissionReportSnapshotMissingBarrierRow proves a broken schema (no
 // barrier row) fails the report rather than producing a clean "open" result.
 func TestAdmissionReportSnapshotMissingBarrierRow(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	_, err := client.db.Exec(ctx, `DELETE FROM admission_barrier WHERE id = 1`)
 	require.NoError(t, err)

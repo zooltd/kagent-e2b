@@ -53,7 +53,7 @@ func readyE2BSession(t *testing.T, client *Client, ctx context.Context) (*apiv1a
 // archive + digest to READY and serves the fork artifact.
 func TestE2BCheckpointReserveFinalizeGetArtifact(t *testing.T) {
 	enableE2BCheckpointCreation(t)
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	session, headTask := readyE2BSession(t, client, ctx)
 
@@ -102,7 +102,7 @@ func TestE2BCheckpointReserveFinalizeGetArtifact(t *testing.T) {
 // than route a checkpoint through the E2B archive path.
 func TestE2BCheckpointRejectsSubstrateSession(t *testing.T) {
 	enableE2BCheckpointCreation(t)
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionFixture(t, client, ctx, "team-a", "sub-rev-"+uuid.NewString()[:8], "assistant", "kagent")
 	insertReadySessionFixture(t, client.db, "11111111-1111-4111-8111-111111111111", "request-1", []byte{})
@@ -116,7 +116,7 @@ func TestE2BCheckpointRejectsSubstrateSession(t *testing.T) {
 // re-finalized to a different artifact.
 func TestE2BCheckpointFinalizeRules(t *testing.T) {
 	enableE2BCheckpointCreation(t)
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	session, headTask := readyE2BSession(t, client, ctx)
 	checkpoint := &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: headTask}
@@ -157,7 +157,7 @@ func enableE2BCheckpointCreation(t *testing.T) {
 // until a consistent stopped-writer boundary exists, so a session is never
 // frozen for an export whose correctness is undemonstrated.
 func TestE2BCheckpointCreationDisabledByDefault(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	session, headTask := readyE2BSession(t, client, ctx)
 
@@ -174,7 +174,7 @@ func TestE2BCheckpointCreationDisabledByDefault(t *testing.T) {
 // no artifact and fail — the pair can never leave READY without an archive.
 func TestE2BCheckpointDeleteCommittedBlocksPromote(t *testing.T) {
 	enableE2BCheckpointCreation(t)
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	session, headTask := readyE2BSession(t, client, ctx)
 	checkpoint := &apiv1alpha1.Checkpoint{Id: uuid.NewString(), SessionId: session.Id, HeadTaskId: headTask}

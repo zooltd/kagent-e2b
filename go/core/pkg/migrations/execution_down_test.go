@@ -13,8 +13,8 @@ import (
 // back to the pre-provider shape when none do.
 func TestExecutionDownRollback(t *testing.T) {
 	dsn := startTestDB(t)
-	exec := ExecutionSource()
-	sources := append(BuiltinSources(false), exec)
+	exec := ExecutionSourceInSchema("public")
+	sources := append(BuiltinSourcesInSchema(false, "public", "public"), exec)
 	if err := RunUp(context.Background(), dsn, sources); err != nil {
 		t.Fatalf("RunUp: %v", err)
 	}

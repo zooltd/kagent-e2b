@@ -18,10 +18,10 @@ The controller restart test needs a stable service endpoint (NodePort or ingress
 `kubectl port-forward` exits when the selected pod is replaced. The suite tests
 public gRPC/MCP calls, owner isolation, binary files, process execution/output,
 suspend/resume, expiration, template revision retention, and controller restart.
-The agent test uses the Helm-installed `kagent-api` RemoteMCPServer, a deterministic
+The agent test uses the CLI-installed `kagent-api` RemoteMCPServer, a deterministic
 local model, and a real Go ADK Session to create a sandbox through MCP as its
-invoking user. Install the chart as release `kagent` in the test namespace with
-its default naming; the test requires that registration and leaves it intact.
+invoking user. Install with `kagent install` in the test namespace; the test
+requires that registration and leaves it intact.
 Once a cluster API URL is set, missing `KAGENT_E2E_RUNTIME_IMAGE` fails the tests
 before provisioning. The same digest-pinned Go ADK image supplies both the agent
 runtime and sandbox tools.
@@ -114,7 +114,7 @@ controller rollouts. Subsequent calls keep their normal failure and retry behavi
 fixture setup does not retry mutations or suppress errors returned by the server.
 
 CI runs four concurrent scenarios on four Substrate worker pods. Substrate
-v0.3.0-alpha3 enables multiple actors per worker by default (`--max-actors=1000`),
+v0.4.0-alpha1 enables multiple actors per worker by default (`--max-actors=1000`),
 so test concurrency is no longer limited to the worker count. A scenario may need
 multiple actors for subagents or template preparation; four scenarios is not a
 four-actor cap. Parallel harness subtests share the same `-parallel` budget as
@@ -130,7 +130,7 @@ Each runtime uploads its own `e2e-logs-gvisor` or `e2e-logs-microvm` artifact.
 The same setup is available locally:
 `KIND_SANDBOX_CLASS=microvm make create-kind-cluster` checks KVM and mounts it
 into the Kind node. After installing Substrate, run
-`SUBSTRATE_VERSION=0.3.0-alpha3 bash scripts/kind/setup-microvm.sh`.
+`SUBSTRATE_VERSION=0.4.0-alpha1 bash scripts/kind/setup-microvm.sh`.
 It fetches the matching Substrate release to use its asset installer and caches
 the downloaded assets under `.cache/substrate/microvm-assets/`.
 
@@ -179,7 +179,7 @@ host and translates its listener to the host address reachable from the
 cluster (`172.17.0.1` on Linux and `host.docker.internal` on macOS). Set
 `KAGENT_E2E_LOCAL_HOST` when the cluster uses a different host address.
 
-Substrate alpha3 policies require DNS names and explicit protocols and ports.
+Substrate policies require DNS names and explicit protocols and ports.
 The mocks use Kubernetes Service names. For tracing, configure the controller's
 OTLP endpoint as `http://e2e-otlp.kagent.svc.cluster.local:14317` and apply
 `manifests/tracing.yaml.tmpl` with `KAGENT_E2E_LOCAL_HOST` set to the test host's

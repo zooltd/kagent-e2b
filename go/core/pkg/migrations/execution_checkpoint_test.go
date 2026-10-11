@@ -17,7 +17,7 @@ import (
 // masquerade as each other at the column level.
 func TestExecutionCheckpointConstraints(t *testing.T) {
 	dsn := startTestDB(t)
-	sources := append(BuiltinSources(false), ExecutionSource())
+	sources := append(BuiltinSourcesInSchema(false, "public", "public"), ExecutionSourceInSchema("public"))
 	if err := RunUp(context.Background(), dsn, sources); err != nil {
 		t.Fatalf("RunUp: %v", err)
 	}

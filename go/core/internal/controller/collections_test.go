@@ -12,7 +12,7 @@ import (
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/apiclient"
 	"github.com/kagent-dev/kagent/go/core/internal/e2b"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube"
@@ -73,7 +73,7 @@ func TestE2BReconciliationResolvesArtifactBinding(t *testing.T) {
 	configMaps := krttest.GetMockCollection[*corev1.ConfigMap](mock)
 	secrets := krttest.GetMockCollection[*corev1.Secret](mock)
 	_, resolvedModelConfigs := newModelConfigReconciliations(krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts)
-	reconciliations := newAgentReconciliations(agents, v2translator.Collections{
+	reconciliations := newAgentReconciliations(agents, translator.Collections{
 		Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
 		RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 		ConfigMaps:       configMaps, Secrets: secrets,
@@ -121,7 +121,7 @@ func TestE2BReconciliationUnmappedWorkloadFails(t *testing.T) {
 	configMaps := krttest.GetMockCollection[*corev1.ConfigMap](mock)
 	secrets := krttest.GetMockCollection[*corev1.Secret](mock)
 	_, resolvedModelConfigs := newModelConfigReconciliations(krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts)
-	reconciliations := newAgentReconciliations(agents, v2translator.Collections{
+	reconciliations := newAgentReconciliations(agents, translator.Collections{
 		Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
 		RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 		ConfigMaps:       configMaps, Secrets: secrets,
@@ -175,7 +175,7 @@ func TestReconciliationCollectionsCompileAndObserveRevision(t *testing.T) {
 	collections.ModelConfigStatuses, collections.ResolvedModelConfigs = newModelConfigReconciliations(collections.ModelConfigs, collections.ConfigMaps, collections.Secrets, opts)
 	collections.Agents = krt.NewStaticCollection(nil, []*kagentv1alpha3.Agent{testAgent(template, matchingHarness)}, opts.WithName("Agents")...)
 	collections.Reconciliations = newAgentReconciliations(
-		collections.Agents, v2translator.Collections{
+		collections.Agents, translator.Collections{
 			Harnesses: collections.Harnesses, AgentTemplates: collections.AgentTemplates, ResolvedModelConfigs: collections.ResolvedModelConfigs,
 			RemoteMCPServers: collections.RemoteMCPServers, ConfigMaps: collections.ConfigMaps,
 			Secrets: collections.Secrets, WorkerPools: collections.WorkerPools,
@@ -238,8 +238,8 @@ func TestReconciliationCollectionsCompileAndObserveRevision(t *testing.T) {
 }
 
 func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
-	for _, harnessType := range []v2translator.HarnessType{
-		v2translator.HarnessTypeKagent, v2translator.HarnessTypeCodex, v2translator.HarnessTypeClaude, v2translator.HarnessTypeBYO,
+	for _, harnessType := range []translator.HarnessType{
+		translator.HarnessTypeKagent, translator.HarnessTypeCodex, translator.HarnessTypeClaude, translator.HarnessTypeBYO,
 	} {
 		t.Run(string(harnessType), func(t *testing.T) {
 			stop := make(chan struct{})
@@ -264,14 +264,14 @@ func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
 				},
 			}
 			switch harnessType {
-			case v2translator.HarnessTypeKagent:
+			case translator.HarnessTypeKagent:
 				runtimeHarness.Spec.Kagent = &kagentv1alpha3.KagentHarness{}
-			case v2translator.HarnessTypeCodex:
+			case translator.HarnessTypeCodex:
 				runtimeHarness.Spec.Codex = &kagentv1alpha3.CodexHarness{}
-			case v2translator.HarnessTypeClaude:
+			case translator.HarnessTypeClaude:
 				runtimeHarness.Spec.Claude = &kagentv1alpha3.ClaudeHarness{}
 				model.Spec.Provider, model.Spec.Model, model.Spec.OpenAI = kagentv1alpha3.ModelProviderAnthropic, "claude-sonnet-4-5", nil
-			case v2translator.HarnessTypeBYO:
+			case translator.HarnessTypeBYO:
 				runtimeHarness.Spec.BYO = &kagentv1alpha3.BYOHarness{}
 				runtimeHarness.Spec.Workload.Command = []string{"/agent"}
 				template.Spec.ModelConfig = nil
@@ -290,7 +290,7 @@ func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
 				{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "unselected"}, Spec: atev1alpha1.WorkerPoolSpec{SandboxClass: atev1alpha1.SandboxClassMicroVM}},
 			}, opts.WithName("WorkerPools")...)
 			observations := krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...)
-			reconciliations := newAgentReconciliations(agents, v2translator.Collections{
+			reconciliations := newAgentReconciliations(agents, translator.Collections{
 				Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModels,
 				RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 				ConfigMaps:       configMaps, Secrets: secrets, WorkerPools: workerPools,
@@ -382,7 +382,7 @@ func TestReconciliationWorkerPoolSandboxClass(t *testing.T) {
 						expected.SandboxConfig = &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"}
 					}
 					require.True(t, proto.Equal(expected, state.Target.ActorTemplate), "sandbox selection must preserve the rest of the ActorTemplate")
-					require.Equal(t, map[string]string{"kagent.dev/worker-pool": "selected"}, state.Target.ActorTemplate.GetWorkerSelector().GetMatchLabels())
+					require.Equal(t, map[string]string{"kagent.dev/worker-pool-name": "selected", "kagent.dev/worker-pool-namespace": "team-a"}, state.Target.ActorTemplate.GetWorkerSelector().GetMatchLabels())
 				})
 			}
 		})
@@ -424,7 +424,7 @@ func TestClaudeReconciliationCompilesActorTemplate(t *testing.T) {
 		krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts,
 	)
 	reconciliations := newAgentReconciliations(
-		agents, v2translator.Collections{
+		agents, translator.Collections{
 			Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,
@@ -435,7 +435,7 @@ func TestClaudeReconciliationCompilesActorTemplate(t *testing.T) {
 		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil
 	})
 	state := reconciliations.List()[0]
-	if state.Target == nil || state.Target.Revision.Environment[0].Name != "ANTHROPIC_API_KEY" || state.Target.Revision.Environment[0].Value != v2translator.CredentialPlaceholder {
+	if state.Target == nil || state.Target.Revision.Environment[0].Name != "ANTHROPIC_API_KEY" || state.Target.Revision.Environment[0].Value != translator.CredentialPlaceholder {
 		t.Fatalf("Claude revision environment = %#v", state.Target.Revision)
 	}
 	if state.Target.ActorTemplate.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPort() != 8081 {
@@ -479,7 +479,7 @@ func TestCodexReconciliationCompilesActorTemplate(t *testing.T) {
 		krttest.GetMockCollection[*kagentv1alpha3.ModelConfig](mock), configMaps, secrets, opts,
 	)
 	reconciliations := newAgentReconciliations(
-		agents, v2translator.Collections{
+		agents, translator.Collections{
 			Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,
@@ -490,7 +490,7 @@ func TestCodexReconciliationCompilesActorTemplate(t *testing.T) {
 		return len(states) == 1 && states[0].CompilationFailure == nil && states[0].Target != nil
 	})
 	state := reconciliations.List()[0]
-	if state.Target == nil || state.Target.Revision.Environment[0].Name != "OPENAI_API_KEY" || state.Target.Revision.Environment[0].Value != v2translator.CredentialPlaceholder {
+	if state.Target == nil || state.Target.Revision.Environment[0].Name != "OPENAI_API_KEY" || state.Target.Revision.Environment[0].Value != translator.CredentialPlaceholder {
 		t.Fatalf("Codex revision environment = %#v", state.Target.Revision)
 	}
 	if state.Target.ActorTemplate.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPort() != 8081 {
@@ -531,7 +531,7 @@ func TestReconciliationTracksSharedAgentTemplate(t *testing.T) {
 	secrets := krttest.GetMockCollection[*corev1.Secret](mock)
 	_, resolvedModelConfigs := newModelConfigReconciliations(modelConfigs, configMaps, secrets, opts)
 	reconciliations := newAgentReconciliations(
-		agents, v2translator.Collections{
+		agents, translator.Collections{
 			Harnesses: krttest.GetMockCollection[*kagentv1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: resolvedModelConfigs,
 			RemoteMCPServers: krttest.GetMockCollection[*kagentv1alpha3.RemoteMCPServer](mock),
 			ConfigMaps:       configMaps, Secrets: secrets,

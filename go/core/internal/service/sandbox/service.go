@@ -22,13 +22,14 @@ import (
 )
 
 type Config struct {
-	Store      *database.Client
-	Kube       client.Client
-	Authorizer auth.Authorizer
-	Actors     substrate.LifecycleClient
-	Guests     *GuestDialer
-	DefaultTTL time.Duration
-	MaxTTL     time.Duration
+	Store                  *database.Client
+	Kube                   client.Client
+	Authorizer             auth.Authorizer
+	Actors                 substrate.LifecycleClient
+	Guests                 *GuestDialer
+	DefaultTTL             time.Duration
+	MaxTTL                 time.Duration
+	ExpirationPollInterval time.Duration
 	// Disabled marks an E2B-only deployment: standalone Sandbox and guest
 	// operations return FailedPrecondition rather than driving a Substrate
 	// runtime that does not exist. Reads still work so the API stays honest.

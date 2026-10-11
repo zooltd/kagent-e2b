@@ -52,12 +52,12 @@ func materializeTrack(t *testing.T, dir string) fstest.MapFS {
 
 func coreSource(t *testing.T, fsys fstest.MapFS) Source {
 	t.Helper()
-	return Source{Name: "core", TrackingTable: coreTrackingTable, FS: fsys, Dir: "."}
+	return Source{Name: "core", Schema: "public", TrackingTable: coreTrackingTable, FS: fsys, Dir: "."}
 }
 
 func executionSource(t *testing.T, fsys fstest.MapFS) Source {
 	t.Helper()
-	return Source{Name: "execution", TrackingTable: executionTrackingTable, FS: fsys, Dir: "."}
+	return Source{Name: "execution", Schema: "public", TrackingTable: executionTrackingTable, FS: fsys, Dir: "."}
 }
 
 // TestUpgradeFreshUpstreamThenExtension covers path 1: a database that has only
@@ -65,12 +65,12 @@ func executionSource(t *testing.T, fsys fstest.MapFS) Source {
 // cleanly, and VerifyMigrated reports the full set migrated.
 func TestUpgradeFreshUpstreamThenExtension(t *testing.T) {
 	dsn := startTestDB(t)
-	core := BuiltinSources(false)
+	core := BuiltinSourcesInSchema(false, "public", "public")
 	if err := RunUp(context.Background(), dsn, core); err != nil {
 		t.Fatalf("upstream RunUp: %v", err)
 	}
 
-	exec := ExecutionSource()
+	exec := ExecutionSourceInSchema("public")
 	if err := RunUp(context.Background(), dsn, []Source{exec}); err != nil {
 		t.Fatalf("extension RunUp: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestUpgradeExistingExtensionNewUpstreamNextExtension(t *testing.T) {
 	dsn := startTestDB(t)
 
 	// Baseline: current upstream + current extension already applied.
-	baseline := append(BuiltinSources(false), ExecutionSource())
+	baseline := append(BuiltinSourcesInSchema(false, "public", "public"), ExecutionSourceInSchema("public"))
 	if err := RunUp(context.Background(), dsn, baseline); err != nil {
 		t.Fatalf("baseline RunUp: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestUpgradeExistingExtensionNewUpstreamNextExtension(t *testing.T) {
 		"DROP TABLE IF EXISTS upstream_next;",
 	)}
 	newCore := coreSource(t, nextCoreFS)
-	if err := RunUp(context.Background(), dsn, append([]Source{newCore}, ExecutionSource())); err != nil {
+	if err := RunUp(context.Background(), dsn, append([]Source{newCore}, ExecutionSourceInSchema("public"))); err != nil {
 		t.Fatalf("new-upstream RunUp: %v", err)
 	}
 	if !testTableExists(t, dsn, "upstream_next") {

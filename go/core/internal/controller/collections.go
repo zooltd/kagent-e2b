@@ -7,7 +7,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/e2b"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
@@ -30,7 +30,7 @@ type Collections struct {
 	AgentRuntimeObservations krt.StaticCollection[AgentRuntimeObservation]
 	Reconciliations          krt.Collection[AgentReconciliation]
 	ModelConfigStatuses      krt.StatusCollection[*kagentv1alpha3.ModelConfig, kagentv1alpha3.ModelConfigStatus]
-	ResolvedModelConfigs     krt.Collection[v2translator.ResolvedModelConfig]
+	ResolvedModelConfigs     krt.Collection[translator.ResolvedModelConfig]
 	AgentStatuses            krt.StatusCollection[*kagentv1alpha3.Agent, kagentv1alpha3.AgentStatus]
 }
 
@@ -39,7 +39,7 @@ type Collections struct {
 type AgentRuntimeObservation struct {
 	Namespace  string
 	AgentName  string
-	RevisionID v2translator.RevisionID
+	RevisionID translator.RevisionID
 	Template   *ateapipb.ActorTemplate
 	Failure    *ReconciliationFailure
 	// E2BReady reports the resolved external artifact passed its readiness
@@ -78,7 +78,7 @@ func NewCollections(client kube.Client, watchNamespaces []string, opts krt.Optio
 	workerPools := workerPoolCollection(client, watchNamespaces, opts, provider)
 	agentRuntimeObservations := krt.NewStaticCollection[AgentRuntimeObservation](nil, nil, opts.WithName("AgentRuntimeObservations")...)
 	modelConfigStatuses, resolvedModelConfigs := newModelConfigReconciliations(modelConfigs, configMaps, secrets, opts)
-	compilerCollections := v2translator.Collections{
+	compilerCollections := translator.Collections{
 		Harnesses: harnesses, AgentTemplates: agentTemplates, ResolvedModelConfigs: resolvedModelConfigs, RemoteMCPServers: remoteMCPServers,
 		ConfigMaps: configMaps, Secrets: secrets, WorkerPools: workerPools,
 	}

@@ -190,7 +190,7 @@ func TestE2BSessionDispatch(t *testing.T) {
 		{"no binding", e2bSession{sessionID, "embed-lab", "sandbox-1", 2}, nil, database.ErrNotFound, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			svc := NewService(&fakeStore{binding: test.binding, session: &apiv1alpha1.Session{Id: sessionID}, bindErr: test.bindErr})
+			svc := NewService(&fakeStore{binding: test.binding, session: &apiv1alpha1.Session{Id: sessionID}, bindErr: test.bindErr}, nil)
 			_, _, err := svc.session(sessCtx(test.ident), sessionID)
 			if test.wantErr {
 				require.Error(t, err)

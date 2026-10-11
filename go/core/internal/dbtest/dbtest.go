@@ -3,6 +3,7 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -60,14 +61,28 @@ func StartT(ctx context.Context, t *testing.T) string {
 	return connStr
 }
 
-// Migrate runs the embedded migrations against connStr and returns any error.
-// If vectorEnabled is true the vector pass is also applied.
-// The fork-owned execution source is always included: runtime_revision now
-// carries a required provider discriminator, so every migration must apply it
-// for revision writes to work. This matches the controller's registration.
+// Migrate installs pgvector for the test database when enabled, then runs the
+// embedded migrations against connStr. The fork-owned execution source is
+// always included: runtime_revision now carries a required provider
+// discriminator, so every migration must apply it for revision writes to work.
+// It runs in the same public schema the test database uses. This matches the
+// controller's registration.
 // Use MigrateT in tests that have a *testing.T; use Migrate in TestMain where no T is available.
 func Migrate(connStr string, vectorEnabled bool) error {
-	return migrations.RunUp(context.Background(), connStr, append(migrations.BuiltinSources(vectorEnabled), migrations.ExecutionSource()))
+	if vectorEnabled {
+		db, err := sql.Open("pgx", connStr)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public"); err != nil {
+			return err
+		}
+	}
+	return migrations.RunUp(context.Background(), connStr, append(
+		migrations.BuiltinSourcesInSchema(vectorEnabled, "public", "public"),
+		migrations.ExecutionSourceInSchema("public"),
+	))
 }
 
 // MigrateT runs the embedded migrations against connStr and calls t.Fatal on error.

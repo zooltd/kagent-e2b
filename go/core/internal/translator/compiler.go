@@ -12,8 +12,7 @@ import (
 )
 
 // Compiler resolves public API objects into a complete, immutable runtime
-// revision. It owns the v2 translation boundary rather than delegating to an
-// earlier API translator.
+// revision. It owns the translation boundary from API objects to runtime inputs.
 type Compiler struct {
 	ctx              krt.HandlerContext
 	collections      Collections
@@ -92,7 +91,8 @@ type AgentInputBinding struct {
 	Agent       *AgentInput
 }
 
-// NewCompiler constructs the v2 runtime compiler.
+// NewCompiler constructs the runtime compiler. provider selects the execution
+// backend the compile targets; empty defaults to Substrate behavior.
 func NewCompiler(ctx krt.HandlerContext, collections Collections, harnessCompilers map[HarnessType]HarnessCompiler, provider ...string) *Compiler {
 	p := ""
 	if len(provider) > 0 {

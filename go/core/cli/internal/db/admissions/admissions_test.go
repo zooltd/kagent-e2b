@@ -10,6 +10,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
+	"github.com/kagent-dev/kagent/go/core/pkg/migrations"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,6 +81,7 @@ func TestAdmissionsAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	dsn := dbtest.StartT(ctx, t)
 	dbtest.MigrateT(t, dsn, false) // execution track carries admission_barrier
+	t.Setenv(env.DatabaseSchema.Name(), "public")
 
 	status := func() string {
 		t.Helper()
@@ -178,6 +180,7 @@ func TestAdmissionsReportAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	dsn := dbtest.StartT(ctx, t)
 	dbtest.MigrateT(t, dsn, false)
+	t.Setenv(env.DatabaseSchema.Name(), "public")
 
 	out, _, err := runCLI(t, "report", "--db-url", dsn)
 	require.NoError(t, err)
@@ -214,4 +217,34 @@ func TestAdmissionsReportAgainstPostgres(t *testing.T) {
 	}()
 	_, _, err = runCLI(t, "report", "--db-url", dsn)
 	require.Error(t, err, "missing barrier row must fail nonzero")
+}
+
+// TestAdmissionsNonPublicSchema proves the CLI connects under the configured
+// schema, not the connection's default search_path. The barrier migrated into
+// a non-public schema must be the row the commands read and flip — without the
+// schema plumbed through Connect, status would miss admission_barrier
+// entirely and report a broken-schema error instead of OPEN.
+func TestAdmissionsNonPublicSchema(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed test in -short mode")
+	}
+	ctx := context.Background()
+	dsn := dbtest.StartT(ctx, t)
+	require.NoError(t, migrations.RunUp(ctx, dsn, append(
+		migrations.BuiltinSourcesInSchema(false, "maint", "maint"),
+		migrations.ExecutionSourceInSchema("maint"),
+	)))
+	t.Setenv(env.DatabaseSchema.Name(), "maint")
+
+	out, _, err := runCLI(t, "status", "--db-url", dsn)
+	require.NoError(t, err, "status must find admission_barrier in the maint schema")
+	assert.Contains(t, out, "OPEN")
+
+	out, _, err = runCLI(t, "close", "--db-url", dsn, "--reason", "drain")
+	require.NoError(t, err)
+	assert.Contains(t, out, "CLOSED")
+
+	out, _, err = runCLI(t, "status", "--db-url", dsn)
+	require.NoError(t, err)
+	assert.Contains(t, out, "CLOSED")
 }

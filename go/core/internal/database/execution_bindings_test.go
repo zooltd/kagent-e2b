@@ -28,7 +28,7 @@ func execSessionFixture(t *testing.T, client *Client, ctx context.Context) strin
 }
 
 func TestExecutionBindingLifecycle(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionID := execSessionFixture(t, client, ctx)
 
@@ -60,7 +60,7 @@ func TestExecutionBindingLifecycle(t *testing.T) {
 }
 
 func TestGetSessionForExecution(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionID := execSessionFixture(t, client, ctx)
 
@@ -78,7 +78,7 @@ func TestGetSessionForExecution(t *testing.T) {
 // afterwards, and a binding for the wrong generation/external compute never
 // authorizes a write in the first place.
 func TestExecutionBindingFencesRuntimeWrite(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionID := execSessionFixture(t, client, ctx)
 	markSessionReady(ctx, client, sessionID, "agent.example")
@@ -124,7 +124,7 @@ func TestExecutionBindingFencesRuntimeWrite(t *testing.T) {
 // the FOR UPDATE lock ordering that serializes a truly concurrent revoke is
 // exercised at the SQL level, not by this test.)
 func TestExecutionBindingRevokedBeforeWrite(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionID := execSessionFixture(t, client, ctx)
 	markSessionReady(ctx, client, sessionID, "agent.example")
@@ -170,7 +170,7 @@ func e2bSessionFixture(t *testing.T, client *Client, ctx context.Context, revisi
 // An E2B revision records NULL ActorTemplate fields and its genuine artifact
 // binding; readers must not see it as a valid Substrate artifact.
 func TestE2BRevisionRecordsNullActorTemplateAndBinding(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -207,7 +207,7 @@ func TestE2BRevisionRecordsNullActorTemplateAndBinding(t *testing.T) {
 // The deferred provider FK rejects an E2B revision whose artifact binding is
 // missing, and rejects a binding whose provider disagrees with its revision.
 func TestE2BRevisionRequiresArtifactBinding(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 
 	// A revision row committed without its binding violates the deferred
@@ -239,7 +239,7 @@ func TestE2BRevisionRequiresArtifactBinding(t *testing.T) {
 // FinishE2BSessionCreate persists the instance binding and transitions to
 // READY atomically with actor_uid NULL and the e2b:// authority handle.
 func TestFinishE2BSessionCreate(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -275,7 +275,7 @@ func TestFinishE2BSessionCreate(t *testing.T) {
 // settled-runtime gate requires no unpublished events and no held dispatch, and
 // a clean E2B session has neither.
 func TestFinishE2BSessionCreateAcceptsFirstDispatch(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -296,7 +296,7 @@ func TestFinishE2BSessionCreateAcceptsFirstDispatch(t *testing.T) {
 // The E2B completion validates the binding installation against the prepared
 // revision and rejects stale operation ownership.
 func TestFinishE2BSessionCreateRejectsMismatchAndStaleOwner(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -326,7 +326,7 @@ func TestFinishE2BSessionCreateRejectsMismatchAndStaleOwner(t *testing.T) {
 // The Substrate completion must refuse an E2B-prepared revision rather than
 // bind an actor UID to it.
 func TestSubstrateFinishRejectsE2BRevision(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -341,7 +341,7 @@ func TestSubstrateFinishRejectsE2BRevision(t *testing.T) {
 // A failing E2B create rolls the session and its instance binding back
 // together: no READY session and no live binding remain.
 func TestFinishE2BSessionCreateRollsBackOnBindingConflict(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -374,7 +374,7 @@ func TestFinishE2BSessionCreateRollsBackOnBindingConflict(t *testing.T) {
 // An identical re-record (e.g. unready then ready promotion) reuses the
 // existing binding; a conflicting immutable binding input is rejected.
 func TestE2BRevisionRerecordReusesIdenticalBinding(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	input := E2BRuntimeRevisionInput{
@@ -426,7 +426,7 @@ func TestE2BRevisionRerecordReusesIdenticalBinding(t *testing.T) {
 // Many E2B revisions may share one external build artifact; only the revision
 // itself is unique in execution_revision_binding.
 func TestE2BRevisionsMayShareExternalBuild(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revA := "e2b-rev-a-" + uuid.NewString()[:8]
 	revB := "e2b-rev-b-" + uuid.NewString()[:8]
@@ -450,7 +450,7 @@ func TestE2BRevisionsMayShareExternalBuild(t *testing.T) {
 // deferred trigger re-checks at COMMIT. Deleting the revision itself cascades
 // the binding without tripping the guard.
 func TestE2BRevisionBindingCannotBeRemovedInIsolation(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -491,7 +491,7 @@ func TestE2BRevisionBindingCannotBeRemovedInIsolation(t *testing.T) {
 // ListOpenE2BCreateOperations returns only E2B CREATE operations that still
 // lack a live binding — the durable intent the late-binding sweep reconciles.
 func TestListOpenE2BCreateOperations(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 
 	// An E2B-prepared session: provider=e2b revision + artifact binding, then a
@@ -547,7 +547,7 @@ func TestListOpenE2BCreateOperations(t *testing.T) {
 // same lock BindE2BSessionCreate takes — so a bound sandbox is never reaped
 // and an adoption can never commit behind the gate's approval.
 func TestE2BOrphanDeletionGate(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -582,7 +582,7 @@ func TestE2BOrphanDeletionGate(t *testing.T) {
 // A completed (bound) session can never be reaped: the live binding claims the
 // external id under the gate's lock.
 func TestE2BOrphanDeletionGateRejectsBoundSandbox(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -609,7 +609,7 @@ func TestE2BOrphanDeletionGateRejectsBoundSandbox(t *testing.T) {
 // live binding — the true orphan: a create that placed a sandbox whose binding
 // was never committed because the executor died after the op timed out.
 func TestE2BOrphanDeletionGateApprovesCommittedOrphan(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -651,7 +651,7 @@ func TestE2BOrphanDeletionGateApprovesCommittedOrphan(t *testing.T) {
 // refusal reason left is the live binding, proving the gate observes it rather
 // than a still-open operation.
 func TestE2BOrphanDeletionGateRefusesCommittedBinding(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -690,7 +690,7 @@ func TestE2BOrphanDeletionGateRefusesCommittedBinding(t *testing.T) {
 // old CREATE operation id can no longer bind the sandbox afterward — the
 // durable state the gate's approval depended on is irreversible.
 func TestE2BOrphanDeletionGateApprovalIsFinal(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -733,7 +733,7 @@ func TestE2BOrphanDeletionGateApprovalIsFinal(t *testing.T) {
 // never-bound session resolves to empty binding fields; a tombstoned session
 // is not found.
 func TestGetExecutionBindingResolution(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 
 	// Never-bound CREATING session: a row with empty binding fields and no
@@ -792,7 +792,7 @@ func TestGetExecutionBindingResolution(t *testing.T) {
 // carve-out unblocks the resolved-lost case; the sibling protections are
 // covered by the tests below.
 func TestE2BBoundThenRevokedCreateIsDeletable(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -866,7 +866,7 @@ func TestE2BBoundThenRevokedCreateIsDeletable(t *testing.T) {
 // outcome create may have placed a live sandbox that must be reconciled, not
 // tombstoned.
 func TestE2BIssuedUnboundCreateIsStuck(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -904,7 +904,7 @@ func TestE2BIssuedUnboundCreateIsStuck(t *testing.T) {
 // being unrevoked means the sandbox may still be running and must not be
 // superseded by a delete that abandons the durable binding.
 func TestE2BLiveBoundCreateDeleteStillBlocked(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -937,7 +937,7 @@ func TestE2BLiveBoundCreateDeleteStillBlocked(t *testing.T) {
 // in-flight attempt: clearing it could race a real bind/finish, so DELETE must
 // stay blocked even though the binding is revoked.
 func TestE2BRevokedCreateInFlightLeaseProtected(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -972,7 +972,7 @@ func TestE2BRevokedCreateInFlightLeaseProtected(t *testing.T) {
 // provider='e2b' predicate (and a substrate binding row can't exist), so the
 // no-blind-supersede invariant is untouched.
 func TestSubstrateRetainedCreateDeleteUnchanged(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	sessionFixture(t, client, ctx, "team-a", "sub-rev-"+uuid.NewString()[:8], "assistant", "kagent")
 	session, _, err := client.CreateSession(ctx, newSessionRequest(uuid.NewString(), "assistant", "kagent", ""), uuid.NewString())
@@ -1017,7 +1017,7 @@ func TestSubstrateRetainedCreateDeleteUnchanged(t *testing.T) {
 // paths against a held binding-row lock and asserting the write blocks on the
 // binding (proving it reached binding AFTER session) rather than deadlocking.
 func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -1111,7 +1111,7 @@ func TestE2BTaskWriteAndDeleteLockOrder(t *testing.T) {
 // return ErrConflict WITHOUT releasing the executor claim — releasing would
 // let a stale path abandon an operation that may have placed compute.
 func TestFailE2BSessionCreateRequiresIssuedAttempt(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")
@@ -1153,7 +1153,7 @@ func TestFailE2BSessionCreateRequiresIssuedAttempt(t *testing.T) {
 // A bind must not silently absorb a 'rejected' attempt or a 'known' attempt
 // pointing at different compute — both are contradictory durable states.
 func TestBindE2BSessionCreateRejectsResolvedOrConflictingAttempt(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	revisionID := "e2b-rev-" + uuid.NewString()[:8]
 	e2bRevisionFixture(t, client, ctx, "team-a", revisionID, "assistant", "embed-lab")

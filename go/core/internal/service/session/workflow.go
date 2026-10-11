@@ -19,6 +19,7 @@ import (
 
 type workflowStore interface {
 	ClaimSessionQuiescence(context.Context) (*database.SessionQuiescence, error)
+	HasPendingSessionQuiescence(context.Context) (bool, error)
 	FinishSessionQuiescence(context.Context, *database.SessionQuiescence, *database.SessionTaskSnapshot) error
 	FinishE2BSessionQuiescence(context.Context, *database.SessionQuiescence) error
 	GetSessionForRuntime(context.Context, string, string) (*apiv1alpha1.Session, error)
@@ -153,8 +154,10 @@ func boolPtr(v bool) *bool { return &v }
 // lifecycle RPCs. Only the claiming caller issues lifecycle mutations; others
 // observe current completion or receive a pending/superseded-operation error.
 type ActorWorkflow struct {
-	store  workflowStore
-	actors actorClient
+	store            workflowStore
+	actors           actorClient
+	recoveryInterval time.Duration
+	quiescenceWake   chan struct{}
 	// e2b resolves an installation's sandbox creator and egress endpoints. nil
 	// means no E2B provider is wired; an E2B revision's create then fails
 	// closed rather than falling back to Substrate.
@@ -180,8 +183,10 @@ func WithE2BCredentialRefresher(r *E2BCredentialRefresher) ActorWorkflowOption {
 	return func(w *ActorWorkflow) { w.credentialRefresh = r }
 }
 
-func NewActorWorkflow(store workflowStore, actors actorClient, opts ...ActorWorkflowOption) *ActorWorkflow {
-	w := &ActorWorkflow{store: store, actors: actors}
+// quiescenceWake is a shared, single-slot hint channel. Callers must not close it;
+// the workflow stops through context cancellation.
+func NewActorWorkflow(store workflowStore, actors actorClient, quiescenceWake chan struct{}, recoveryInterval time.Duration, opts ...ActorWorkflowOption) *ActorWorkflow {
+	w := &ActorWorkflow{store: store, actors: actors, recoveryInterval: recoveryInterval, quiescenceWake: quiescenceWake}
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -285,7 +290,12 @@ func (w *ActorWorkflow) run(ctx context.Context, sessionID string, requestedKind
 	if err != nil {
 		return nil, err
 	}
-	return w.execute(ctx, operation)
+	result, err := w.execute(ctx, operation)
+	if err == nil && result.GetState() == apiv1alpha1.RuntimeState_RUNTIME_STATE_READY {
+		// A resume can make old unclaimed idle work eligible again.
+		w.wakeQuiescence()
+	}
+	return result, err
 }
 
 // execute keeps lifecycle preparation separate from the durable issue boundary.

@@ -17,7 +17,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	"github.com/kagent-dev/kagent/go/core/internal/substrate"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 	byotranslator "github.com/kagent-dev/kagent/go/core/internal/translator/byo"
 	claudetranslator "github.com/kagent-dev/kagent/go/core/internal/translator/claude"
 	codextranslator "github.com/kagent-dev/kagent/go/core/internal/translator/codex"
@@ -53,8 +53,8 @@ type AgentReconciliation struct {
 // compiledTarget is published only after compilation, hashing, and ActorTemplate
 // construction all succeed. An absent target means there is no desired runtime.
 type compiledTarget struct {
-	Revision      v2translator.Revision
-	RevisionID    v2translator.RevisionID
+	Revision      translator.Revision
+	RevisionID    translator.RevisionID
 	ActorTemplate *ateapipb.ActorTemplate
 	// E2B carries the resolved artifact binding and launch contract when the
 	// provider is E2B; ActorTemplate is nil in that mode.
@@ -111,7 +111,7 @@ type ReconciliationFailure struct {
 
 func newAgentReconciliations(
 	agents krt.Collection[*kagentv1alpha3.Agent],
-	collections v2translator.Collections,
+	collections translator.Collections,
 	agentRuntimeObservations krt.Collection[AgentRuntimeObservation],
 	opts krt.OptionsBuilder,
 	provider string,
@@ -120,16 +120,16 @@ func newAgentReconciliations(
 ) krt.Collection[AgentReconciliation] {
 	return krt.NewCollection(agents, func(ctx krt.HandlerContext, agent *kagentv1alpha3.Agent) *AgentReconciliation {
 		state := &AgentReconciliation{Agent: agent}
-		compilation, err := v2translator.NewCompiler(ctx, collections, map[v2translator.HarnessType]v2translator.HarnessCompiler{
-			v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
-			v2translator.HarnessTypeCodex:  codextranslator.NewCompiler(ctx, collections),
-			v2translator.HarnessTypeClaude: claudetranslator.NewCompiler(ctx, collections),
-			v2translator.HarnessTypeBYO:    byotranslator.NewCompiler(ctx, collections),
+		compilation, err := translator.NewCompiler(ctx, collections, map[translator.HarnessType]translator.HarnessCompiler{
+			translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
+			translator.HarnessTypeCodex:  codextranslator.NewCompiler(ctx, collections),
+			translator.HarnessTypeClaude: claudetranslator.NewCompiler(ctx, collections),
+			translator.HarnessTypeBYO:    byotranslator.NewCompiler(ctx, collections),
 		}, provider).CompileAgent(context.Background(), agent)
 		if err != nil {
 			condition, reason := kagentv1alpha3.AgentConditionResolvedRefs, "ReferenceResolutionFailed"
-			var validation *v2translator.ValidationError
-			var missingPool *v2translator.WorkerPoolNotFoundError
+			var validation *translator.ValidationError
+			var missingPool *translator.WorkerPoolNotFoundError
 			switch {
 			case errors.As(err, &validation):
 				condition, reason = kagentv1alpha3.AgentConditionCompatible, "UnsupportedConfiguration"
@@ -162,7 +162,7 @@ func newAgentReconciliations(
 				state.CompilationFailure = &ReconciliationFailure{Condition: kagentv1alpha3.AgentConditionCompatible, Reason: "E2BArtifactInvalid", Message: err.Error()}
 				return state
 			}
-			revisionID, err := revision.E2BDigest(v2translator.E2BArtifact{
+			revisionID, err := revision.E2BDigest(translator.E2BArtifact{
 				Installation: e2bInstallation, TemplateID: workload.TemplateID, BuildID: workload.BuildID,
 				LaunchContract: contract,
 			})
@@ -287,13 +287,13 @@ func newReconciler(
 		status:           status,
 		e2bArtifactReady: e2bArtifactReady,
 	}
-	r.agents = newReconciliationQueue("v2-agents", func(item any) error {
+	r.agents = newReconciliationQueue("agents", func(item any) error {
 		return r.reconcileAgent(context.Background(), item.(string))
 	})
-	r.agentStatuses = newReconciliationQueue("v2-agent-status", func(item any) error {
+	r.agentStatuses = newReconciliationQueue("agent-status", func(item any) error {
 		return r.reconcileAgentStatus(context.Background(), item.(string))
 	})
-	r.modelConfigStatuses = newReconciliationQueue("v2-model-config-status", func(item any) error {
+	r.modelConfigStatuses = newReconciliationQueue("model-config-status", func(item any) error {
 		return r.reconcileModelConfigStatus(context.Background(), item.(string))
 	})
 

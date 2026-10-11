@@ -26,7 +26,7 @@ import (
 	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/a2agateway"
-	v2controller "github.com/kagent-dev/kagent/go/core/internal/controller"
+	"github.com/kagent-dev/kagent/go/core/internal/controller"
 	mcpservercontroller "github.com/kagent-dev/kagent/go/core/internal/controller/mcpserver"
 	remotemcpcontroller "github.com/kagent-dev/kagent/go/core/internal/controller/remotemcpserver"
 	scheduledruncontroller "github.com/kagent-dev/kagent/go/core/internal/controller/scheduledrun"
@@ -34,7 +34,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/e2b"
 	"github.com/kagent-dev/kagent/go/core/internal/grpcserver"
 	authimpl "github.com/kagent-dev/kagent/go/core/internal/httpserver/auth"
-	v2mcp "github.com/kagent-dev/kagent/go/core/internal/mcp"
+	"github.com/kagent-dev/kagent/go/core/internal/mcp"
 	"github.com/kagent-dev/kagent/go/core/internal/service/checkpoint"
 	"github.com/kagent-dev/kagent/go/core/internal/service/kubecrud"
 	memoryservice "github.com/kagent-dev/kagent/go/core/internal/service/memory"
@@ -47,7 +47,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/service/taskstore"
 	toolservice "github.com/kagent-dev/kagent/go/core/internal/service/tool"
 	"github.com/kagent-dev/kagent/go/core/internal/substrate"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
 	kagentenv "github.com/kagent-dev/kagent/go/core/pkg/env"
@@ -56,6 +56,7 @@ import (
 	"github.com/kagent-dev/kagent/go/pkg/telemetry"
 	kmcp "github.com/kagent-dev/kmcp/api/v1alpha1"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelprometheus "go.opentelemetry.io/otel/exporters/prometheus"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -103,6 +104,7 @@ type Options struct {
 	// ExtraMigrations are applied after the built-in tracks, in the order
 	// given. A library consumer that owns tables uses this rather than migrating
 	// separately, so that one run leaves the database wholly at one version.
+	// Each source must set Schema.
 	ExtraMigrations []migrations.Source
 	// GRPCServices registers additional services on core's gRPC server, so a
 	// consumer's API shares core's transport, authenticator and interceptors
@@ -164,9 +166,20 @@ func Run(ctx context.Context, opts Options) error {
 	if err := SetupLogger(); err != nil {
 		return err
 	}
+	quiescenceInterval := kagentenv.SessionQuiescencePollInterval.Get()
+	if quiescenceInterval <= 0 {
+		return fmt.Errorf("%s must be positive", kagentenv.SessionQuiescencePollInterval.Name())
+	}
+	dbURL := kagentenv.PostgresDatabaseURL.Get()
+	if dbURL == "" {
+		return fmt.Errorf("%s is required", kagentenv.PostgresDatabaseURL.Name())
+	}
+	if err := database.ValidateURL(dbURL); err != nil {
+		return fmt.Errorf("validate database connection: %w", err)
+	}
 	logger := slog.Default()
 	ctx = logging.IntoContext(ctx, logger)
-	_, telemetryWarnings := v2translator.TelemetryConfigFromProcess()
+	_, telemetryWarnings := translator.TelemetryConfigFromProcess()
 	for _, warning := range telemetryWarnings {
 		logger.WarnContext(ctx, "invalid agent telemetry configuration; disabling signal", "error", warning)
 	}
@@ -198,33 +211,31 @@ func Run(ctx context.Context, opts Options) error {
 	// combinations before any side-effects (migrations, manager, Substrate
 	// dial). A signing-key + Substrate deployment would silently break every
 	// guest callback, so it fails fast here.
-	executionProvider := strings.ToLower(kagentenv.ExecutionProvider.Get())
+	executionProvider := strings.ToLower(strings.TrimSpace(kagentenv.ExecutionProvider.Get()))
 	e2bOnly := executionProvider == "e2b"
 	if err := validateExecutionProviderConfig(executionProvider, kagentenv.ExecutionSigningKeyFile.Get()); err != nil {
 		return err
 	}
 
-	dbURL, err := database.ResolveURL(env(kagentenv.PostgresDatabaseURL), kagentenv.PostgresDatabaseURLFile.Get())
+	vectorEnabled := kagentenv.DatabaseVectorEnabled.Get()
+	dbRole := kagentenv.DatabaseRole.Get()
+	sources, err := migrationSources(vectorEnabled, opts.ExtraMigrations)
 	if err != nil {
 		return err
 	}
-	vectorEnabled := kagentenv.DatabaseVectorEnabled.Get()
-	// Appended, not merged: the built-in tracks must reach their final version
-	// before a library consumer's tables, which may reference them.
-	sources := append(migrations.BuiltinSources(vectorEnabled), opts.ExtraMigrations...)
 	if kagentenv.SkipMigrations.Get() {
-		if err := migrations.VerifyMigrated(ctx, dbURL, sources); err != nil {
+		if err := migrations.VerifyMigratedAsRole(ctx, dbURL, dbRole, sources); err != nil {
 			return fmt.Errorf("verify database migrations: %w", err)
 		}
-	} else if err := migrations.RunUp(ctx, dbURL, sources); err != nil {
+	} else if err := migrations.RunUpAsRole(ctx, dbURL, dbRole, sources); err != nil {
 		return fmt.Errorf("run database migrations: %w", err)
 	}
-	db, err := database.Connect(ctx, &database.PostgresConfig{URL: dbURL, VectorEnabled: vectorEnabled})
+	db, err := database.Connect(ctx, postgresConfigFromEnv(dbURL, vectorEnabled))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	store := database.NewClient(db)
+	store := database.NewClient(db, env(kagentenv.DatabaseVectorSchema))
 
 	kubeConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{},
@@ -293,7 +304,7 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("KAGENT_E2B_INSTALLATION %q is not a key of KAGENT_E2B_INSTALLATIONS", e2bInstallation)
 		}
 	}
-	runtime, err := v2controller.NewRuntime(kubeConfig, watchNamespaces, ctx.Done(), executionProvider, e2bInstallations, e2bInstallation)
+	runtime, err := controller.NewRuntime(kubeConfig, watchNamespaces, ctx.Done(), executionProvider, e2bInstallations, e2bInstallation)
 	if err != nil {
 		return err
 	}
@@ -322,7 +333,7 @@ func Run(ctx context.Context, opts Options) error {
 	// templates is nil under E2B — the reconciler branches to the E2B path
 	// before ever touching it.
 	{
-		reconciler, err := v2controller.NewReconciler(kubeConfig, runtime.Collections, store, actors, e2bArtifactReadiness(e2bInstallations))
+		reconciler, err := controller.NewReconciler(kubeConfig, runtime.Collections, store, actors, e2bArtifactReadiness(e2bInstallations))
 		if err != nil {
 			return err
 		}
@@ -330,7 +341,11 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("add reconciler to controller manager: %w", err)
 		}
 		if !e2bOnly {
-			if err := manager.Add(v2controller.NewRuntimeRevisionGC(store, actors)); err != nil {
+			runtimeGC, err := controller.NewRuntimeRevisionGC(store, actors, kagentenv.RuntimeRevisionGCInterval.Get(), otel.GetMeterProvider())
+			if err != nil {
+				return fmt.Errorf("create runtime revision GC: %w", err)
+			}
+			if err := manager.Add(runtimeGC); err != nil {
 				return fmt.Errorf("add runtime revision GC to controller manager: %w", err)
 			}
 		}
@@ -418,7 +433,7 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}
 		if len(reaperInstallations) > 0 {
-			orphanLookup := func(installation string) (v2controller.E2BOrphanLister, error) {
+			orphanLookup := func(installation string) (controller.E2BOrphanLister, error) {
 				inst, ok := e2bInstallations[installation]
 				if !ok {
 					return nil, fmt.Errorf("E2B installation %q is not configured", installation)
@@ -428,10 +443,10 @@ func Run(ctx context.Context, opts Options) error {
 			// The late-binding reconciler runs ahead of the orphan reaper's
 			// delete so a sandbox whose create response was lost is adopted by
 			// its open operation before the reaper could reap it as unbound.
-			if err := manager.Add(v2controller.NewE2BLateBindingReconciler(store, reaperInstallations, orphanLookup)); err != nil {
+			if err := manager.Add(controller.NewE2BLateBindingReconciler(store, reaperInstallations, orphanLookup)); err != nil {
 				return fmt.Errorf("add E2B late-binding reconciler to controller manager: %w", err)
 			}
-			reaper := v2controller.NewE2BOrphanReaper(store, reaperInstallations,
+			reaper := controller.NewE2BOrphanReaper(store, reaperInstallations,
 				orphanLookup)
 			if err := manager.Add(reaper); err != nil {
 				return fmt.Errorf("add E2B orphan reaper to controller manager: %w", err)
@@ -441,8 +456,8 @@ func Run(ctx context.Context, opts Options) error {
 			// shares the installation map; a configured-but-lifetime-less
 			// installation yields no renewal (the sandbox ages to its
 			// timeout-to-pause bound).
-			if err := manager.Add(v2controller.NewE2BTimeoutRenewer(store,
-				func(installation string) (v2controller.E2BTimeoutSetter, int32, error) {
+			if err := manager.Add(controller.NewE2BTimeoutRenewer(store,
+				func(installation string) (controller.E2BTimeoutSetter, int32, error) {
 					inst, ok := e2bInstallations[installation]
 					if !ok || inst.API == "" {
 						return nil, 0, fmt.Errorf("E2B installation %q is not configured for timeout renewal", installation)
@@ -458,11 +473,11 @@ func Run(ctx context.Context, opts Options) error {
 					case configured == 0:
 						// Omitted: resolve to the resume floor.
 						lifetime = e2b.ResumeLifetimeSeconds
-					case configured < v2controller.MinRenewableLifetimeSeconds:
+					case configured < controller.MinRenewableLifetimeSeconds:
 						// A positive lifetime shorter than the renewal cadence
 						// lets an admitted task pause between sweeps. Reject it
 						// rather than silently upgrading the operator's intent.
-						return nil, 0, fmt.Errorf("E2B sandbox timeout %ds is unsafe: below the %ds renewal floor, an admitted task could pause mid-turn", configured, v2controller.MinRenewableLifetimeSeconds)
+						return nil, 0, fmt.Errorf("E2B sandbox timeout %ds is unsafe: below the %ds renewal floor, an admitted task could pause mid-turn", configured, controller.MinRenewableLifetimeSeconds)
 					default:
 						lifetime = configured
 					}
@@ -479,8 +494,8 @@ func Run(ctx context.Context, opts Options) error {
 			// stale one stops authorizing callbacks. Only a definitive 404
 			// revokes; any uncertainty leaves the binding live and the dialer
 			// reports runtime loss at use time instead.
-			if err := manager.Add(v2controller.NewE2BLossReaper(store,
-				func(installation string) (v2controller.E2BLossInspector, error) {
+			if err := manager.Add(controller.NewE2BLossReaper(store,
+				func(installation string) (controller.E2BLossInspector, error) {
 					inst, ok := e2bInstallations[installation]
 					if !ok || inst.API == "" {
 						return nil, fmt.Errorf("E2B installation %q is not configured for loss inspection", installation)
@@ -496,7 +511,7 @@ func Run(ctx context.Context, opts Options) error {
 			// is a concrete pointer that is nil without a signing key, and a
 			// typed-nil into the interface defeats the renewer's nil guard.
 			if e2bCredRefresh != nil {
-				if err := manager.Add(v2controller.NewE2BCredentialRenewer(store, e2bCredRefresh)); err != nil {
+				if err := manager.Add(controller.NewE2BCredentialRenewer(store, e2bCredRefresh)); err != nil {
 					return fmt.Errorf("add E2B credential renewer to controller manager: %w", err)
 				}
 			}
@@ -537,8 +552,9 @@ func Run(ctx context.Context, opts Options) error {
 				}, nil
 			}))
 	}
-	sessionWorkflow := sessionsvc.NewActorWorkflow(store, actors, workflowOpts...)
-	runtimeTasks := taskstore.NewService(store)
+	quiescenceWake := make(chan struct{}, 1)
+	sessionWorkflow := sessionsvc.NewActorWorkflow(store, actors, quiescenceWake, quiescenceInterval, workflowOpts...)
+	runtimeTasks := taskstore.NewService(store, quiescenceWake)
 	if err := manager.Add(sessionWorkflow); err != nil {
 		return fmt.Errorf("register idle session worker: %w", err)
 	}
@@ -549,7 +565,11 @@ func Run(ctx context.Context, opts Options) error {
 	if err := manager.Add(expiration); err != nil {
 		return fmt.Errorf("register session expiration worker: %w", err)
 	}
-	sessions := sessionsvc.NewService(store, authorizer, sessionWorkflow)
+	shareMaxTTL := kagentenv.SessionShareMaxTTL.Get()
+	if shareMaxTTL < 0 {
+		return fmt.Errorf("%s must not be negative", kagentenv.SessionShareMaxTTL.Name())
+	}
+	sessions := sessionsvc.NewService(store, authorizer, sessionWorkflow, sessionsvc.WithShareMaxTTL(shareMaxTTL))
 	checkpoints := checkpoint.NewService(store, authorizer, actors, sessionWorkflow)
 	var substrateDialer *a2agateway.RuntimeDialer
 	if !e2bOnly {
@@ -594,13 +614,23 @@ func Run(ctx context.Context, opts Options) error {
 	gatewayDialer := a2agateway.NewProviderDialer(substrateDialer, e2bDialer)
 	agents := kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.Agent{}, &kagentv1alpha3.AgentList{}, "Agent")
 	interactions := sessionsvc.NewInteractionService(store, agents, sessions)
+	pushSender := sessionsvc.NewHTTPPushSender(5*time.Second,
+		kagentenv.A2APushAllowHTTP.Get(), kagentenv.A2APushAllowPrivateNetworks.Get())
+	pushIssuer := cmp.Or(kagentenv.A2APushIssuer.Get(), kagentenv.KagentGatewayURL.Get(), "http://127.0.0.1:8083")
+	pushSigner, err := sessionsvc.NewPushJWTSigner(kagentenv.A2APushSigningPrivateKey.Get(), strings.TrimRight(pushIssuer, "/"))
+	if err != nil {
+		return fmt.Errorf("configure push JWT signing: %w", err)
+	}
+	if err := manager.Add(sessionsvc.NewPushWorker(store, pushSender, pushSigner)); err != nil {
+		return fmt.Errorf("failed to add push worker: %w", err)
+	}
 	gateway := a2agateway.New(interactions, gatewayDialer, cmp.Or(kagentenv.KagentGatewayURL.Get(), "http://127.0.0.1:8083"))
 	schedules := scheduledrun.NewService(store, manager.GetClient(), authorizer)
-	if err := manager.Add(scheduledruncontroller.NewScheduler(store)); err != nil {
+	if err := manager.Add(scheduledruncontroller.NewScheduler(store, kagentenv.ScheduledRunPollInterval.Get())); err != nil {
 		return fmt.Errorf("add scheduled run scheduler: %w", err)
 	}
 	if err := manager.Add(scheduledruncontroller.NewController(store, sessionWorkflow,
-		gateway)); err != nil {
+		gateway, kagentenv.ScheduledRunExecutionPollInterval.Get())); err != nil {
 		return fmt.Errorf("add scheduled run controller: %w", err)
 	}
 	sandboxTemplates := kubecrud.NewService(manager.GetClient(), authorizer, &kagentv1alpha3.SandboxTemplate{}, &kagentv1alpha3.SandboxTemplateList{}, kagentv1alpha3.SandboxTemplateKind)
@@ -617,7 +647,7 @@ func Run(ctx context.Context, opts Options) error {
 			CPU:        kagentenv.SandboxCPU.Get(),
 			Memory:     kagentenv.SandboxMemory.Get(),
 		}
-		preparation, err := v2controller.NewSandboxReconciler(kubeConfig, runtime, store, actors, policy)
+		preparation, err := controller.NewSandboxReconciler(kubeConfig, runtime, store, actors, policy)
 		if err != nil {
 			return err
 		}
@@ -626,7 +656,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 	sandboxes, err := sandboxservice.NewService(sandboxservice.Config{Store: store, Kube: manager.GetClient(), Authorizer: authorizer, Actors: actors, Guests: guests,
-		DefaultTTL: kagentenv.SandboxDefaultTTL.Get(), MaxTTL: kagentenv.SandboxMaxTTL.Get(),
+		DefaultTTL: kagentenv.SandboxDefaultTTL.Get(), MaxTTL: kagentenv.SandboxMaxTTL.Get(), ExpirationPollInterval: kagentenv.SandboxExpirationPollInterval.Get(),
 		// E2B-only: standalone sandbox + guest/PTY/file ops return
 		// FailedPrecondition rather than driving a Substrate runtime that does
 		// not exist. Reads still work so the API stays honest.
@@ -637,7 +667,7 @@ func Run(ctx context.Context, opts Options) error {
 	if err := manager.Add(sandboxes); err != nil {
 		return err
 	}
-	mcpHandler, err := v2mcp.New(sessions, checkpoints, gateway, sandboxes, sandboxTemplates)
+	mcpHandler, err := mcp.New(sessions, checkpoints, gateway, sandboxes, sandboxTemplates)
 	if err != nil {
 		return err
 	}
@@ -647,6 +677,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", rootHealthHandler)
+	if pushSigner != nil {
+		mux.Handle("GET /.well-known/jwks.json", pushSigner)
+	} else {
+		mux.HandleFunc("GET /.well-known/jwks.json", http.NotFound)
+	}
 	mux.Handle("/mcp", otelhttp.NewHandler(auth.AuthnMiddleware(authenticator)(mcpHandler), "/mcp"))
 	mux.Handle(a2agateway.HTTPPathPrefix, otelhttp.NewHandler(a2agateway.NewHTTPHandler(gateway, authenticator, store), a2agateway.HTTPPathPrefix))
 	// The private runtime callback's trust model is fixed by configuration.
@@ -733,6 +768,34 @@ func rootHealthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// migrationSources appends extra after the built-in tracks: the built-ins must reach
+// their final version before a library consumer's tables, which may reference them.
+// An extra source without a schema would resolve to the connection's default schema
+// rather than Kagent's, so it is rejected.
+func migrationSources(vectorEnabled bool, extra []migrations.Source) ([]migrations.Source, error) {
+	for _, src := range extra {
+		if src.Schema == "" {
+			return nil, fmt.Errorf("extra migration source %q must set Schema", src.Name)
+		}
+	}
+	builtins := migrations.BuiltinSourcesInSchema(vectorEnabled, kagentenv.DatabaseSchema.Get(), kagentenv.DatabaseVectorSchema.Get())
+	return append(builtins, extra...), nil
+}
+
+func postgresConfigFromEnv(source string, vectorEnabled bool) *database.PostgresConfig {
+	return &database.PostgresConfig{
+		URL:             source,
+		Role:            kagentenv.DatabaseRole.Get(),
+		Schema:          kagentenv.DatabaseSchema.Get(),
+		VectorSchema:    kagentenv.DatabaseVectorSchema.Get(),
+		VectorEnabled:   vectorEnabled,
+		MaxConns:        new(int32(kagentenv.PostgresDatabaseMaxConns.Get())),
+		MinConns:        new(int32(kagentenv.PostgresDatabaseMinConns.Get())),
+		MaxConnIdleTime: new(kagentenv.PostgresDatabaseMaxConnIdleTime.Get()),
+		MaxConnLifetime: new(kagentenv.PostgresDatabaseMaxConnLifetime.Get()),
+	}
 }
 
 // metricsBindAddress resolves KAGENT_METRICS_BIND_ADDRESS. controller-runtime reads an

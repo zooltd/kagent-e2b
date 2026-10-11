@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2apb/v1"
@@ -14,7 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	v2controller "github.com/kagent-dev/kagent/go/core/internal/controller"
+	"github.com/kagent-dev/kagent/go/core/internal/controller"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
 	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	"github.com/kagent-dev/kagent/go/core/internal/e2b"
@@ -36,7 +37,7 @@ func e2bFixture(t *testing.T) (*database.Client, *apiv1alpha1.Session, *database
 	pool, err := pgxpool.New(t.Context(), conn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	client := database.NewClient(pool)
+	client := database.NewClient(pool, "public")
 
 	revision := &database.RuntimeRevision{
 		Revision: "e2b-rev-1", Namespace: "team-a", AgentName: "assistant", AgentUID: "agent-uid",
@@ -166,7 +167,7 @@ func e2bProvider(creator E2BSessionCreator, cfg E2BCreateConfig) *E2BProvider {
 func TestE2BCreateIssuesSandboxAndBindsIt(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "198.51.100.1:19001", CallbackAddress: "198.51.100.1:18443", SandboxTimeoutSeconds: 3600}))))
 
 	created, err := workflow.Create(context.Background(), session)
@@ -204,7 +205,7 @@ func TestE2BCreateIssuesSandboxAndBindsIt(t *testing.T) {
 
 func TestE2BCreateFailsWithoutProvider(t *testing.T) {
 	client, session, _ := e2bFixture(t)
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}})
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour)
 	// No WithE2BProvider: an E2B revision's create must fail closed, not dial
 	// Substrate.
 	_, err := workflow.Create(context.Background(), session)
@@ -214,7 +215,7 @@ func TestE2BCreateFailsWithoutProvider(t *testing.T) {
 func TestE2BNonCreateOperationRejected(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	// A RESUME on a session that was never created is rejected at admission —
 	// its state is CREATING, not SUSPENDED — and never reaches the provider.
@@ -228,7 +229,7 @@ func TestE2BNonCreateOperationRejected(t *testing.T) {
 func TestE2BSuspendPausesBoundSandboxKeepsBinding(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -250,7 +251,7 @@ func TestE2BSuspendPausesBoundSandboxKeepsBinding(t *testing.T) {
 func TestE2BResumeWakesBoundSandbox(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -270,7 +271,7 @@ func TestE2BResumeWakesBoundSandbox(t *testing.T) {
 func TestE2BResumeGoneSandboxIsRuntimeLoss(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}, resumeErr: &e2b.Error{Status: 404, Message: "gone"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -286,7 +287,7 @@ func TestE2BResumeGoneSandboxIsRuntimeLoss(t *testing.T) {
 func TestE2BDeleteRemovesSandboxAndRevokesBinding(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "198.51.100.1:19001", CallbackAddress: "198.51.100.1:18443"}))))
 
 	created, err := workflow.Create(context.Background(), session)
@@ -337,7 +338,7 @@ func TestE2BCreateBootstrapsOnlyBoundSandbox(t *testing.T) {
 		Config:       E2BCreateConfig{BrokerAddress: "198.51.100.1:19001", CallbackAddress: "198.51.100.1:18443"},
 		Bootstrapper: func(*e2b.Sandbox, []byte) (E2BBootstrapper, error) { return boot, nil },
 	}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -359,7 +360,7 @@ func TestE2BCreateBootstrapFailureRecoversSameSandbox(t *testing.T) {
 		Config:       E2BCreateConfig{BrokerAddress: "198.51.100.1:19001", CallbackAddress: "198.51.100.1:18443"},
 		Bootstrapper: func(*e2b.Sandbox, []byte) (E2BBootstrapper, error) { return boot, nil },
 	}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	// First attempt: create lands, binding commits, bootstrap fails -> error,
@@ -398,7 +399,7 @@ func TestE2BCreateRejectsMissingBootstrapper(t *testing.T) {
 		Creator: fake,
 		Config:  E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"},
 	}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -425,7 +426,7 @@ func TestE2BCreateReconcilesSingleLostSandbox(t *testing.T) {
 		Metadata: map[string]string{"kagent.dev/session": session.Id},
 	}}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	created, err := workflow.Create(context.Background(), session)
@@ -449,7 +450,7 @@ func TestE2BCreateQuarantinesMultipleMatches(t *testing.T) {
 		{SandboxID: "sb-b", TemplateID: "tpl-abc", Metadata: map[string]string{}},
 	}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -466,7 +467,7 @@ func TestE2BCreateZeroMatchesStaysPending(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{err: context.DeadlineExceeded}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -482,7 +483,7 @@ func TestE2BCreateNoListerStaysPending(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{err: context.DeadlineExceeded}
 	provider := &E2BProvider{Creator: fake, Config: E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}} // no Lister
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -502,7 +503,7 @@ func TestE2BCreateRetryAfterEmptyListDoesNotRecreate(t *testing.T) {
 	boot := &fakeBootstrapper{}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
 	provider.Bootstrapper = func(*e2b.Sandbox, []byte) (E2BBootstrapper, error) { return boot, nil }
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	// First attempt: create issued, listing empty -> pending, createCalls=1.
@@ -528,7 +529,7 @@ func TestE2BCreateDefinitiveRejectionReleasesAndRetries(t *testing.T) {
 	boot := &fakeBootstrapper{}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
 	provider.Bootstrapper = func(*e2b.Sandbox, []byte) (E2BBootstrapper, error) { return boot, nil }
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	// First attempt: definitive rejection. No listing happens — there is no
@@ -567,7 +568,7 @@ func TestE2BCreateDefinitiveRejectionStillDeletes(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{err: &e2b.Error{Status: 400, Message: "invalid template"}}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	_, err := workflow.Create(context.Background(), session)
@@ -585,7 +586,7 @@ func TestE2BCreateDefinitiveRejectionStillDeletes(t *testing.T) {
 func TestE2BIdleSessionPausesWithoutCheckpoint(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 
 	created, err := workflow.Create(context.Background(), session)
@@ -639,7 +640,7 @@ func TestE2BIdleSessionPausesWithoutCheckpoint(t *testing.T) {
 
 	// Controller restart: a fresh workflow over the same store still resolves
 	// the live binding — durable state, not process memory, owns the session.
-	restarted := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	restarted := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	binding, err := client.GetLiveExecutionBinding(context.Background(), created.Id)
 	require.NoError(t, err, "binding survives controller restart")
@@ -671,7 +672,7 @@ func claimSettledE2BIdle(t *testing.T, client *database.Client, session *apiv1al
 func TestE2BIdlePauseNotFoundResolvesAsLoss(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	created, err := workflow.Create(context.Background(), session)
 	require.NoError(t, err)
@@ -700,7 +701,7 @@ func TestE2BIdlePauseNotFoundResolvesAsLoss(t *testing.T) {
 func TestE2BIdleRevokedBindingResolvesAsLoss(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	created, err := workflow.Create(context.Background(), session)
 	require.NoError(t, err)
@@ -727,7 +728,7 @@ func TestE2BIdleRevokedBindingResolvesAsLoss(t *testing.T) {
 func TestE2BIdlePauseTransientErrorRetainsUncertainty(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{sandbox: &e2b.Sandbox{SandboxID: "sb-live-1"}}
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	created, err := workflow.Create(context.Background(), session)
 	require.NoError(t, err)
@@ -753,7 +754,7 @@ func TestE2BDelayedCreateAfterEmptyListBindsOnSweep(t *testing.T) {
 	client, session, _ := e2bFixture(t)
 	fake := &fakeE2B{err: context.DeadlineExceeded}
 	provider := e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"})
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(provider)))
 
 	// First attempt: create "fails" and the list is still empty -> pending.
@@ -773,8 +774,8 @@ func TestE2BDelayedCreateAfterEmptyListBindsOnSweep(t *testing.T) {
 	}}
 
 	// The late-binding sweep claims the open op and binds the verified match.
-	reconciler := v2controller.NewE2BLateBindingReconciler(client, []string{"embed-lab"},
-		func(string) (v2controller.E2BOrphanLister, error) { return fake, nil })
+	reconciler := controller.NewE2BLateBindingReconciler(client, []string{"embed-lab"},
+		func(string) (controller.E2BOrphanLister, error) { return fake, nil })
 	reconciler.ReconcileOnce(context.Background())
 
 	binding, err := client.GetLiveExecutionBinding(context.Background(), session.Id)
@@ -797,7 +798,7 @@ func TestE2BCrashedExecutorIntentReconciledBySweep(t *testing.T) {
 	pool, err := pgxpool.New(ctx, conn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	client := database.NewClient(pool)
+	client := database.NewClient(pool, "public")
 
 	revision := &database.RuntimeRevision{
 		Revision: "e2b-rev-1", Namespace: "team-a", AgentName: "assistant", AgentUID: "agent-uid",
@@ -831,8 +832,8 @@ func TestE2BCrashedExecutorIntentReconciledBySweep(t *testing.T) {
 	}}}
 
 	// While executor A's claim is live the sweep cannot take it over.
-	reconciler := v2controller.NewE2BLateBindingReconciler(client, []string{"embed-lab"},
-		func(string) (v2controller.E2BOrphanLister, error) { return fake, nil })
+	reconciler := controller.NewE2BLateBindingReconciler(client, []string{"embed-lab"},
+		func(string) (controller.E2BOrphanLister, error) { return fake, nil })
 	reconciler.ReconcileOnce(ctx)
 	_, berr := client.GetLiveExecutionBinding(ctx, session.Id)
 	require.Error(t, berr, "a live abandoned claim is not taken over early")
@@ -853,7 +854,7 @@ func TestE2BCrashedExecutorIntentReconciledBySweep(t *testing.T) {
 // create path once, so the refresher has a real binding+revision to act on.
 func boundE2B(t *testing.T, fake *fakeE2B, boot *fakeBootstrapper) (*database.Client, *apiv1alpha1.Session) {
 	client, session, _ := e2bFixture(t)
-	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}},
+	workflow := NewActorWorkflow(client, &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}, make(chan struct{}, 1), time.Hour,
 		WithE2BProvider(e2bLookup(e2bProvider(fake, E2BCreateConfig{BrokerAddress: "b:1", CallbackAddress: "c:2"}))))
 	_, err := workflow.Create(context.Background(), session)
 	require.NoError(t, err)

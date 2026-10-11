@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
+	"github.com/kagent-dev/kagent/go/core/pkg/consts"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/spf13/cobra"
 )
@@ -85,20 +85,26 @@ func (s *commandState) withClient(command *cobra.Command, fn func(ctx context.Co
 	}
 	ctx, cancel := context.WithTimeout(command.Context(), opTimeout)
 	defer cancel()
-	// Parse the URL with pgx itself but discard its error text: ParseConfig's
-	// error echoes the raw DSN (which may embed a password). On parse failure
-	// report only that the value was invalid — never its contents. A DSN that
-	// parses reaches Connect, whose remaining failures are network-level and
-	// name the host, not the credential.
-	if _, err := pgxpool.ParseConfig(dsn); err != nil {
+	// Validate the URL without echoing its contents: the parse error retains
+	// the DSN, so report only that the value was invalid — never its text. A
+	// DSN that parses reaches Connect, whose remaining failures are
+	// network-level and name the host, not the credential.
+	if err := database.ValidateURL(dsn); err != nil {
 		return fmt.Errorf("invalid database URL supplied via --db-url or %s", env.PostgresDatabaseURL.Name())
 	}
-	pool, err := database.Connect(ctx, &database.PostgresConfig{URL: dsn})
+	// The barrier lives in the same schema migrations target; connect under
+	// the configured schema and role so `db migrate` and `db admissions`
+	// address the same admission_barrier row.
+	pool, err := database.Connect(ctx, &database.PostgresConfig{
+		URL:    dsn,
+		Role:   env.DatabaseRole.Get(),
+		Schema: env.DatabaseSchema.Get(),
+	})
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
 	defer pool.Close()
-	return fn(ctx, database.NewClient(pool))
+	return fn(ctx, database.NewClient(pool, consts.DefaultPgvectorSchema))
 }
 
 func newStatusCmd(state *commandState) *cobra.Command {

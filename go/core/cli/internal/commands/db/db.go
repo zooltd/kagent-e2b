@@ -48,12 +48,12 @@ func NewDBCmd() *cobra.Command {
 // precedence, on: the KAGENT_DATABASE_VECTOR_ENABLED env var in the CLI's own
 // environment (explicit operator intent, works without a cluster), the
 // controller's configmap on the live cluster (the same value the server
-// reads), and finally the CLI's fallback (enabled).
+// reads), and finally the controller's default (disabled).
 func migrationSources(namespace *string) dbmigrate.SourcesFunc {
 	return func(ctx context.Context) ([]migrations.Source, error) {
-		vectorEnabled := true
+		vectorEnabled := false
 		if b, set, err := kagentenv.DatabaseVectorEnabled.LookupWithError(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v; assuming true\n", err)
+			fmt.Fprintf(os.Stderr, "warning: %v; assuming false\n", err)
 		} else if set {
 			vectorEnabled = b
 		} else if b, ok := clusterVectorEnabled(ctx, *namespace); ok {
@@ -61,9 +61,12 @@ func migrationSources(namespace *string) dbmigrate.SourcesFunc {
 		}
 		// The execution track carries the E2B/provider schema that ordinary store
 		// operations now depend on, including in Substrate mode. Register it after
-		// the built-in tracks, exactly as controller startup does via
-		// Options.ExtraMigrations — BuiltinSources stays upstream-ordered.
-		return append(migrations.BuiltinSources(vectorEnabled), migrations.ExecutionSource()), nil
+		// the built-in tracks in the same schema, exactly as controller startup
+		// does via Options.ExtraMigrations — BuiltinSources stays upstream-ordered.
+		return append(
+			migrations.BuiltinSourcesInSchema(vectorEnabled, kagentenv.DatabaseSchema.Get(), kagentenv.DatabaseVectorSchema.Get()),
+			migrations.ExecutionSourceInSchema(kagentenv.DatabaseSchema.Get()),
+		), nil
 	}
 }
 

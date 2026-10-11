@@ -46,6 +46,10 @@ func (gatewayTestAuthSession) Principal() auth.Principal {
 
 type gatewayTestStore struct {
 	*database.Client
+	pushConfig       *a2atype.PushConfig
+	pushErr          error
+	pushSessionID    string
+	pushMessageID    string
 	reserveCalls     int
 	revokeCalls      int
 	revokeContextErr error
@@ -83,6 +87,11 @@ func (s *gatewayTestStore) CheckAdmissionsOpen(context.Context) error {
 		return database.ErrAdmissionClosed
 	}
 	return nil
+}
+
+func (s *gatewayTestStore) RegisterSessionPushNotification(_ context.Context, sessionID, messageID, taskID string, config *a2atype.PushConfig) error {
+	s.pushConfig, s.pushSessionID, s.pushMessageID = config, sessionID, messageID
+	return s.pushErr
 }
 
 func (s *gatewayTestStore) ReserveSessionDispatch(_ context.Context, _ string, _ uuid.UUID, initialID string) error {
@@ -209,7 +218,9 @@ type gatewayTestRuntime struct {
 	cancelErr    error
 	sendCalls    int
 	sentTaskID   a2atype.TaskID
+	sentConfig   *a2atype.SendMessageConfig
 	onSend       func() error
+	onStream     func(*a2atype.SendMessageRequest)
 }
 
 func (r *gatewayTestRuntime) CancelTask(context.Context, a2aclient.ServiceParams, *a2atype.CancelTaskRequest) (*a2atype.Task, error) {
@@ -244,6 +255,7 @@ func (r *gatewayTestRuntime) SendMessage(_ context.Context, _ a2aclient.ServiceP
 	r.sent = true
 	r.sendCalls++
 	r.sentTaskID = req.Message.TaskID
+	r.sentConfig = req.Config
 	if r.onSend != nil {
 		if err := r.onSend(); err != nil {
 			return nil, err
@@ -256,6 +268,10 @@ func (r *gatewayTestRuntime) SendMessage(_ context.Context, _ a2aclient.ServiceP
 }
 
 func (r *gatewayTestRuntime) SendStreamingMessage(_ context.Context, _ a2aclient.ServiceParams, req *a2atype.SendMessageRequest) iter.Seq2[a2atype.Event, error] {
+	r.sentConfig = req.Config
+	if r.onStream != nil {
+		r.onStream(req)
+	}
 	return func(yield func(a2atype.Event, error) bool) {
 		if r.task != nil {
 			yield(r.task, nil)
@@ -266,7 +282,11 @@ func (r *gatewayTestRuntime) SendStreamingMessage(_ context.Context, _ a2aclient
 			yield(a2atype.NewStatusUpdateEvent(task, r.streamState, a2atype.NewMessage(a2atype.MessageRoleAgent, a2atype.NewTextPart("approve?"))), nil)
 			return
 		}
-		yield(&a2atype.Task{ID: req.Message.TaskID, ContextID: req.Message.ContextID, Status: a2atype.TaskStatus{State: a2atype.TaskStateCompleted}}, nil)
+		taskID := req.Message.TaskID
+		if taskID == "" {
+			taskID = "runtime-task"
+		}
+		yield(&a2atype.Task{ID: taskID, ContextID: req.Message.ContextID, Status: a2atype.TaskStatus{State: a2atype.TaskStateCompleted}}, nil)
 	}
 }
 
@@ -573,7 +593,7 @@ func TestGatewayBuildsAgentCardFromAgentRevision(t *testing.T) {
 		card.SupportedInterfaces[1].ProtocolBinding != a2atype.TransportProtocolGRPC {
 		t.Fatalf("public interfaces = %#v", card.SupportedInterfaces)
 	}
-	if !card.Capabilities.Streaming || !card.Capabilities.ExtendedAgentCard || card.Capabilities.PushNotifications {
+	if !card.Capabilities.Streaming || !card.Capabilities.ExtendedAgentCard || !card.Capabilities.PushNotifications {
 		t.Fatalf("gateway capabilities = %#v", card.Capabilities)
 	}
 	// Transport and streaming are the gateway's to state, but extensions describe

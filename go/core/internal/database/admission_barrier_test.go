@@ -33,7 +33,7 @@ func leaveAdmissionsOpen(t *testing.T, client *Client) {
 // store readable. Rejection happens inside insertSession's transaction, so no
 // partial session row is left behind.
 func TestAdmissionsClosedRejectsNewSession(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -60,7 +60,7 @@ func TestAdmissionsClosedRejectsNewSession(t *testing.T) {
 // gates a NEW turn while the already-accepted-message retry still resolves —
 // the recovery-vs-admission distinction the drain depends on.
 func TestAdmissionsClosedBlocksNewDispatchButNotRetry(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -98,7 +98,7 @@ func TestAdmissionsClosedBlocksNewDispatchButNotRetry(t *testing.T) {
 // TestAdmissionsClosedBlocksNewResume proves RESUME (new work) honors the
 // barrier while the not-admitting retry path (needed==false) is untouched.
 func TestAdmissionsClosedBlocksNewResume(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -134,7 +134,7 @@ func TestAdmissionsClosedBlocksNewResume(t *testing.T) {
 // new admission and that the flag persists across a fresh store instance.
 func TestAdmissionsReopenRestoresAdmission(t *testing.T) {
 	db := setupTestDB(t)
-	client := NewClient(db)
+	client := NewClient(db, "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -159,12 +159,12 @@ func TestAdmissionsReopenRestoresAdmission(t *testing.T) {
 func TestAdmissionsClosedPersistsAcrossStoreInstance(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
-	first := NewClient(db)
+	first := NewClient(db, "public")
 	leaveAdmissionsOpen(t, first)
 	_, err := first.SetAdmissionsClosed(ctx, true, "drain")
 	require.NoError(t, err)
 
-	second := NewClient(db) // fresh handle over the same pool — no shared memory
+	second := NewClient(db, "public") // fresh handle over the same pool — no shared memory
 	closed, err := second.AdmissionsClosed(ctx)
 	require.NoError(t, err)
 	require.True(t, closed, "closed state must persist across store instances")
@@ -174,7 +174,7 @@ func TestAdmissionsClosedPersistsAcrossStoreInstance(t *testing.T) {
 // session via insertSessionRecords directly, not insertSession — still honors
 // the barrier. It would otherwise be a silent new-admission bypass.
 func TestAdmissionsClosedRejectsFork(t *testing.T) {
-	client := NewClient(setupTestDB(t))
+	client := NewClient(setupTestDB(t), "public")
 	ctx := context.Background()
 	leaveAdmissionsOpen(t, client)
 	sessionFixture(t, client, ctx, "team-a", "sub-rev", "assistant", "kagent")
@@ -246,7 +246,7 @@ func waitForBlockedQuery(t *testing.T, db *pgxpool.Pool, ctx context.Context, qu
 // closed and is refused with no partial writes.
 func TestAdmissionsCloseSerializesWithAdmission(t *testing.T) {
 	db := setupTestDB(t)
-	client := NewClient(db)
+	client := NewClient(db, "public")
 	// Bound every database call and channel wait so a stuck lock fails the test
 	// instead of hanging the suite.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -326,7 +326,7 @@ func TestAdmissionsCloseSerializesWithAdmission(t *testing.T) {
 // check would trust.
 func TestAdmissionsClosedMissingRowIsError(t *testing.T) {
 	db := setupTestDB(t)
-	client := NewClient(db)
+	client := NewClient(db, "public")
 	ctx := context.Background()
 
 	// Remove and restore the singleton row around the read.
@@ -350,7 +350,7 @@ func TestAdmissionsClosedMissingRowIsError(t *testing.T) {
 // the decision, released before any dial.
 func TestCheckAdmissionsOpenSerializesWithClose(t *testing.T) {
 	db := setupTestDB(t)
-	client := NewClient(db)
+	client := NewClient(db, "public")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	leaveAdmissionsOpen(t, client)

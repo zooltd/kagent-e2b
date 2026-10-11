@@ -20,23 +20,20 @@ type SessionQuiescence struct {
 	ExecutorID uuid.UUID
 }
 
-// SessionQuiescenceOutcome is the typed result a provider reports for an idle
-// boundary: whether a resumable checkpoint was retained or the runtime is
-// merely paused with no durable continuation. The store uses it to decide
-// whether a snapshot is required and whether checkpoint/fork stays legal.
-type SessionQuiescenceOutcome int
-
-const (
-	// QuiescenceCheckpointRetained means the provider left a durable
-	// checkpoint boundary (Substrate's external snapshot). A snapshot record
-	// must accompany the finish.
-	QuiescenceCheckpointRetained SessionQuiescenceOutcome = iota
-	// QuiescencePausedWithoutCheckpoint means the provider confirmed a pause
-	// but retained no resumable checkpoint. Snapshot columns stay NULL and
-	// checkpoint/fork returns FailedPrecondition — there is no durable
-	// continuation to fork from. This is the E2B filesystem-only-pause result.
-	QuiescencePausedWithoutCheckpoint
-)
+// HasPendingSessionQuiescence includes ready sessions temporarily blocked by
+// dispatch, checkpoints, lifecycle operations, or row locks. Already claimed
+// work is excluded: its runtime outcome may be uncertain and cannot be retried
+// by another worker. Suspended/deleted sessions need no automatic runtime work.
+func (c *Client) HasPendingSessionQuiescence(ctx context.Context) (bool, error) {
+	return queryOne(ctx, c.db, `
+		SELECT EXISTS (
+			SELECT 1 FROM session_task_event e JOIN session_record i ON i.history_id = e.history_id
+			WHERE e.published AND e.quiescence_pending = TRUE
+			  AND e.quiescence_executor_id IS NULL
+			  AND i.state = 'RUNTIME_STATE_READY'
+		)
+	`, pgx.RowTo[bool])
+}
 
 // ClaimSessionQuiescence claims an idle session at its latest settled task
 // version. A new turn supersedes unclaimed idle work; a claim blocks task writes,
@@ -161,14 +158,13 @@ func (c *Client) FinishSessionQuiescence(ctx context.Context, work *SessionQuies
 	})
 }
 
-// FinishE2BSessionQuiescence records an E2B idle boundary as a typed outcome
+// FinishE2BSessionQuiescence records an E2B idle boundary as a confirmed pause
 // rather than a Substrate snapshot. An E2B pause retains no resumable
-// checkpoint, so the outcome is always QuiescencePausedWithoutCheckpoint:
-// snapshot columns are left NULL and the idle claim is cleared atomically in
-// one transaction. Terminal tasks are allowed — there is no retained
-// checkpoint to require — and the absence of a session_task_snapshot row is
-// what makes a later checkpoint/fork return FailedPrecondition. The claim is
-// verified against the same executor binding the Substrate finish uses.
+// checkpoint, so snapshot columns are left NULL and the idle claim is cleared
+// atomically in one transaction. Terminal tasks are allowed — there is no
+// retained checkpoint to require — and the absence of a session_task_snapshot
+// row is what makes a later checkpoint/fork return FailedPrecondition. The
+// claim is verified against the same executor binding the Substrate finish uses.
 func (c *Client) FinishE2BSessionQuiescence(ctx context.Context, work *SessionQuiescence) error {
 	if work == nil || work.ExecutorID == uuid.Nil {
 		return fmt.Errorf("claimed task boundary is required")
